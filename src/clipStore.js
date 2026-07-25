@@ -4,10 +4,12 @@
  */
 
 const DB_NAME = 'videomerge-clips';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE = 'clips';
 const AUDIO_STORE = 'audio';
+const PREVIEW_STORE = 'preview';
 const AUDIO_ID = 'bgm';
+const PREVIEW_ID = 'preview';
 
 /**
  * @typedef {{
@@ -48,6 +50,9 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains(AUDIO_STORE)) {
         db.createObjectStore(AUDIO_STORE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(PREVIEW_STORE)) {
+        db.createObjectStore(PREVIEW_STORE, { keyPath: 'id' });
       }
     };
   });
@@ -236,6 +241,70 @@ export async function clearStoredAudio() {
     const db = await openDb();
     const tx = db.transaction(AUDIO_STORE, 'readwrite');
     tx.objectStore(AUDIO_STORE).delete(AUDIO_ID);
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Persist last preview MP4 until user regenerates or clears preview.
+ * @param {Blob | null} blob
+ * @param {{ hasSubtitles?: boolean, filename?: string }} [meta]
+ */
+export async function savePreview(blob, meta = {}) {
+  const db = await openDb();
+  const tx = db.transaction(PREVIEW_STORE, 'readwrite');
+  const store = tx.objectStore(PREVIEW_STORE);
+  if (!(blob instanceof Blob) || !blob.size) {
+    store.delete(PREVIEW_ID);
+  } else {
+    store.put({
+      id: PREVIEW_ID,
+      blob,
+      type: blob.type || 'video/mp4',
+      size: blob.size,
+      hasSubtitles: Boolean(meta.hasSubtitles),
+      filename: meta.filename || 'preview.mp4',
+      savedAt: Date.now(),
+    });
+  }
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('預覽儲存中止'));
+  });
+}
+
+/**
+ * @returns {Promise<{ blob: Blob, hasSubtitles: boolean, filename: string, savedAt: number } | null>}
+ */
+export async function loadPreview() {
+  try {
+    const db = await openDb();
+    const tx = db.transaction(PREVIEW_STORE, 'readonly');
+    const store = tx.objectStore(PREVIEW_STORE);
+    const row = await reqToPromise(store.get(PREVIEW_ID));
+    if (!row?.blob || !(row.blob instanceof Blob) || !row.blob.size) return null;
+    return {
+      blob: row.blob,
+      hasSubtitles: Boolean(row.hasSubtitles),
+      filename: row.filename || 'preview.mp4',
+      savedAt: Number(row.savedAt) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function clearStoredPreview() {
+  try {
+    const db = await openDb();
+    const tx = db.transaction(PREVIEW_STORE, 'readwrite');
+    tx.objectStore(PREVIEW_STORE).delete(PREVIEW_ID);
     await new Promise((resolve, reject) => {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);

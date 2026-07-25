@@ -24,13 +24,27 @@ export function createSubtitleTimeline(root, opts) {
   let pxPerSec = 48;
   let selectedIdx = -1;
   let snapEnabled = true;
+  /** When moving a cue, shift this cue and all later cues by the same delta */
+  let autoFollow = true;
   const SNAP = 0.05;
   const MIN_CUE = 0.2;
   /** Left label column width (px) — room for # + text */
   const LABEL_W = 200;
   const ROW_H = 36;
 
-  /** @type {null | { mode: 'move'|'start'|'end', idx: number, startX: number, origS: number, origE: number, pointerId: number }} */
+  /**
+   * @typedef {{
+   *   mode: 'move'|'start'|'end',
+   *   idx: number,
+   *   startX: number,
+   *   origS: number,
+   *   origE: number,
+   *   pointerId: number,
+   *   origAll: { s: number, e: number, text: string }[],
+   *   _live?: SubChunk[],
+   * }} DragState
+   */
+  /** @type {DragState | null} */
   let drag = null;
 
   root.classList.add('tl-editor');
@@ -38,7 +52,7 @@ export function createSubtitleTimeline(root, opts) {
     <div class="tl-toolbar">
       <div class="tl-toolbar-left">
         <span class="tl-toolbar-title">字幕時間軸</span>
-        <span class="tl-toolbar-hint" data-tl="count-hint">每句一列 · 拖曳色塊移動 · 左右手柄改起迄</span>
+        <span class="tl-toolbar-hint" data-tl="count-hint">每句一列 · 拖曳色塊移動 · 後句可自動跟隨</span>
       </div>
       <div class="tl-toolbar-right">
         <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-out" title="縮小">−</button>
@@ -47,6 +61,10 @@ export function createSubtitleTimeline(root, opts) {
         <label class="tl-snap-label" title="拖曳時吸附 0.05s">
           <input type="checkbox" data-tl="snap" checked />
           <span>吸附</span>
+        </label>
+        <label class="tl-snap-label" title="移動某句時，該句與之後所有句子一起平移相同秒數（例：第1句 0→6 秒，後句皆 +6 秒）">
+          <input type="checkbox" data-tl="follow" checked />
+          <span>後句自動跟隨</span>
         </label>
       </div>
     </div>
@@ -137,6 +155,54 @@ export function createSubtitleTimeline(root, opts) {
     return [start, end];
   }
 
+  /**
+   * Shift cues from fromIdx (inclusive) by delta seconds (start+end).
+   * Clamps delta so no cue starts before 0 or ends past maxDur when possible.
+   * @param {{ s: number, e: number, text: string }[]} origAll
+   * @param {number} fromIdx
+   * @param {number} delta
+   * @param {number} maxDur
+   * @param {boolean} follow  if false, only fromIdx is shifted
+   * @returns {{ chunks: SubChunk[], delta: number }}
+   */
+  function shiftCuesFrom(origAll, fromIdx, delta, maxDur, follow) {
+    const last = follow ? origAll.length - 1 : fromIdx;
+    let d = Number(delta) || 0;
+    if (!Number.isFinite(d) || fromIdx < 0 || fromIdx >= origAll.length) {
+      return {
+        chunks: origAll.map((o) => ({ timestamp: [o.s, o.e], text: o.text })),
+        delta: 0,
+      };
+    }
+
+    // Bound delta so every affected cue stays in [0, maxDur]
+    let minD = -Infinity;
+    let maxD = Infinity;
+    for (let i = fromIdx; i <= last; i++) {
+      const o = origAll[i];
+      minD = Math.max(minD, -o.s);
+      if (Number.isFinite(maxDur) && maxDur > 0) {
+        maxD = Math.min(maxD, maxDur - o.e);
+      }
+    }
+    if (Number.isFinite(minD) && Number.isFinite(maxD) && minD > maxD) {
+      // Cannot move without clipping; prefer start >= 0
+      d = minD;
+    } else {
+      if (Number.isFinite(minD)) d = Math.max(minD, d);
+      if (Number.isFinite(maxD)) d = Math.min(maxD, d);
+    }
+    d = snap(d);
+
+    const chunks = origAll.map((o, i) => {
+      if (i < fromIdx || i > last) {
+        return { timestamp: [o.s, o.e], text: o.text };
+      }
+      return { timestamp: [o.s + d, o.e + d], text: o.text };
+    });
+    return { chunks, delta: d };
+  }
+
   function setPlayhead(sec) {
     const x = LABEL_W + Math.max(0, sec) * pxPerSec;
     el.playhead.style.transform = `translateX(${x}px)`;
@@ -190,8 +256,9 @@ export function createSubtitleTimeline(root, opts) {
 
     if (el.countHint) {
       el.countHint.textContent = chunks.length
-        ? `共 ${chunks.length} 句 · 每句獨立一列（非擠在同一列）`
-        : '每句一列 · 拖曳色塊移動 · 左右手柄改起迄';
+        ? `共 ${chunks.length} 句 · 每句一列` +
+          (autoFollow ? ' · 後句自動跟隨已開' : ' · 後句自動跟隨已關')
+        : '每句一列 · 可開「後句自動跟隨」整段平移';
     }
 
     el.rows.innerHTML = '';
@@ -349,6 +416,9 @@ export function createSubtitleTimeline(root, opts) {
   root.querySelector('[data-tl="snap"]')?.addEventListener('change', (e) => {
     snapEnabled = Boolean(/** @type {HTMLInputElement} */ (e.target).checked);
   });
+  root.querySelector('[data-tl="follow"]')?.addEventListener('change', (e) => {
+    autoFollow = Boolean(/** @type {HTMLInputElement} */ (e.target).checked);
+  });
 
   el.scroll.addEventListener(
     'wheel',
@@ -401,6 +471,11 @@ export function createSubtitleTimeline(root, opts) {
         origS: Number(c.timestamp[0]) || 0,
         origE: Number(c.timestamp[1]) || 0,
         pointerId: e.pointerId,
+        origAll: chunks.map((ch) => ({
+          s: Number(ch.timestamp[0]) || 0,
+          e: Number(ch.timestamp[1]) || 0,
+          text: ch.text,
+        })),
       };
       clip.setPointerCapture?.(e.pointerId);
       return;
@@ -444,28 +519,43 @@ export function createSubtitleTimeline(root, opts) {
   window.addEventListener('pointermove', (e) => {
     if (!drag) return;
     const chunks = opts.getChunks();
-    if (!chunks?.length) return;
+    if (!chunks?.length || !drag.origAll?.length) return;
     const dx = (e.clientX - drag.startX) / pxPerSec;
     const maxDur = duration();
-    const next = chunks.map((c) => ({
-      timestamp: [c.timestamp[0], c.timestamp[1]],
-      text: c.text,
+    /** @type {SubChunk[]} */
+    let next;
+
+    if (drag.mode === 'move') {
+      // Desired delta from original position; follow-mode shifts this cue + all later
+      let wantDelta = snap(drag.origS + dx) - drag.origS;
+      const shifted = shiftCuesFrom(
+        drag.origAll,
+        drag.idx,
+        wantDelta,
+        maxDur,
+        autoFollow,
+      );
+      next = shifted.chunks;
+      const s = next[drag.idx].timestamp[0];
+      const end = next[drag.idx].timestamp[1];
+      livePaint(next);
+      if (selectedIdx === drag.idx) {
+        el.selStart.value = String(round2(s));
+        el.selEnd.value = String(round2(end));
+        el.selDur.textContent = `長度 ${(end - s).toFixed(2)}s`;
+      }
+      drag._live = next;
+      return;
+    }
+
+    // Resize handles: only this cue (no auto-follow)
+    next = drag.origAll.map((o) => ({
+      timestamp: [o.s, o.e],
+      text: o.text,
     }));
     let s = drag.origS;
     let end = drag.origE;
-    if (drag.mode === 'move') {
-      const len = drag.origE - drag.origS;
-      s = snap(drag.origS + dx);
-      end = s + len;
-      if (end > maxDur) {
-        end = maxDur;
-        s = Math.max(0, end - len);
-      }
-      if (s < 0) {
-        s = 0;
-        end = len;
-      }
-    } else if (drag.mode === 'start') {
+    if (drag.mode === 'start') {
       s = snap(drag.origS + dx);
       s = Math.min(s, drag.origE - MIN_CUE);
       s = Math.max(0, s);
@@ -518,6 +608,37 @@ export function createSubtitleTimeline(root, opts) {
     let end = Number(el.selEnd.value);
     if (!Number.isFinite(s) || !Number.isFinite(end)) return;
     [s, end] = clampCue(snap(s), snap(end), maxDur);
+
+    const origS = Number(chunks[selectedIdx].timestamp[0]) || 0;
+    const origE = Number(chunks[selectedIdx].timestamp[1]) || 0;
+    const origLen = origE - origS;
+    const newLen = end - s;
+    const delta = s - origS;
+    // Pure translate (duration unchanged) + auto-follow → ripple later cues
+    const isTranslate = Math.abs(newLen - origLen) < 0.02 && Math.abs(end - (origE + delta)) < 0.05;
+
+    if (autoFollow && isTranslate && Math.abs(delta) >= 0.001) {
+      const origAll = chunks.map((c) => ({
+        s: Number(c.timestamp[0]) || 0,
+        e: Number(c.timestamp[1]) || 0,
+        text: c.text,
+      }));
+      const { chunks: shifted } = shiftCuesFrom(
+        origAll,
+        selectedIdx,
+        delta,
+        maxDur,
+        true,
+      );
+      // Keep edited text on selected row
+      shifted[selectedIdx] = {
+        timestamp: [...shifted[selectedIdx].timestamp],
+        text: el.selText.value,
+      };
+      commitChunks(shifted);
+      return;
+    }
+
     const next = chunks.map((c, i) =>
       i === selectedIdx
         ? { timestamp: [s, end], text: el.selText.value }
@@ -554,23 +675,18 @@ export function createSubtitleTimeline(root, opts) {
     } else return;
     e.preventDefault();
     const maxDur = duration();
-    const next = chunks.map((c) => ({
-      timestamp: [c.timestamp[0], c.timestamp[1]],
+    const origAll = chunks.map((c) => ({
+      s: Number(c.timestamp[0]) || 0,
+      e: Number(c.timestamp[1]) || 0,
       text: c.text,
     }));
-    const c = next[selectedIdx];
-    const len = c.timestamp[1] - c.timestamp[0];
-    let s = snap(c.timestamp[0] + ds);
-    let end = s + len;
-    if (s < 0) {
-      s = 0;
-      end = len;
-    }
-    if (end > maxDur) {
-      end = maxDur;
-      s = Math.max(0, end - len);
-    }
-    next[selectedIdx] = { timestamp: [s, end], text: c.text };
+    const { chunks: next } = shiftCuesFrom(
+      origAll,
+      selectedIdx,
+      ds,
+      maxDur,
+      autoFollow,
+    );
     commitChunks(next);
   });
 

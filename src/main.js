@@ -8,6 +8,9 @@ import {
   saveAudio,
   loadAudio,
   clearStoredAudio,
+  savePreview,
+  loadPreview,
+  clearStoredPreview,
 } from './clipStore.js';
 import {
   getMediaDuration,
@@ -319,6 +322,9 @@ app.innerHTML = `
             <button type="button" class="btn btn-ghost btn-sm" id="btn-download-srt-collapsed" hidden>
               下載 SRT
             </button>
+            <button type="button" class="btn btn-danger btn-sm" id="btn-clear-preview-collapsed" hidden>
+              清除預覽
+            </button>
           </div>
         </div>
         <div class="result-body" id="result-body">
@@ -329,7 +335,7 @@ app.innerHTML = `
           </div>
           <h3 id="result-title">預覽影片</h3>
           <p class="field-hint" id="result-phase-hint">
-            這是<strong>預覽</strong>：可播放、對字幕。請先調好字幕軸，再按「正式輸出影片」。
+            這是<strong>預覽</strong>（會保留到你重新「產生預覽」或按「清除預覽」）。可播放、對字幕後再正式輸出。
           </p>
           <video class="result-video" id="result-video" controls playsinline crossorigin="anonymous">
             <track id="result-track" kind="subtitles" srclang="zh" label="預覽字幕" default hidden />
@@ -355,7 +361,7 @@ app.innerHTML = `
                   />
                 </label>
                 <button type="button" class="btn btn-ghost btn-sm" id="btn-subs-first">套用第一句時間</button>
-                <span class="field-hint" id="subs-first-hint">例如開唱約 6 秒就填 6</span>
+                <span class="field-hint" id="subs-first-hint">例如填 6：第1句對到 6 秒，後句一併往後平移相同秒數</span>
               </div>
               <div class="subs-adjust-row" id="subs-adjust-row">
                 <label class="field field-inline" for="subs-adjust-offset">
@@ -416,6 +422,9 @@ app.innerHTML = `
             <a class="btn btn-ghost" id="btn-download-preview" download="preview.mp4" hidden>下載預覽影片（無嵌入字幕）</a>
             <button type="button" class="btn btn-ghost" id="btn-download-srt" hidden>
               下載 SRT 字幕
+            </button>
+            <button type="button" class="btn btn-danger" id="btn-clear-preview" hidden>
+              清除預覽
             </button>
             <button type="button" class="btn btn-ghost" id="btn-dismiss-result">收合預覽</button>
           </div>
@@ -505,6 +514,8 @@ const els = {
   btnDownloadSrtCollapsed: document.getElementById('btn-download-srt-collapsed'),
   btnShowResult: document.getElementById('btn-show-result'),
   btnDismissResult: document.getElementById('btn-dismiss-result'),
+  btnClearPreview: document.getElementById('btn-clear-preview'),
+  btnClearPreviewCollapsed: document.getElementById('btn-clear-preview-collapsed'),
   toastRegion: document.getElementById('toast-region'),
   headerMeta: document.getElementById('header-meta'),
 };
@@ -1172,10 +1183,14 @@ function syncResultPhaseUI() {
   }
 
   if (els.btnDownloadPreview) {
-    els.btnDownloadPreview.hidden = !hasSubs || !resultUrl;
+    // Always offer preview download when preview video exists
+    els.btnDownloadPreview.hidden = !resultUrl;
     if (resultUrl) {
       els.btnDownloadPreview.href = resultUrl;
       els.btnDownloadPreview.download = `preview-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.mp4`;
+      els.btnDownloadPreview.textContent = hasSubs
+        ? '下載預覽影片（無嵌入字幕）'
+        : '下載預覽影片';
     }
   }
 
@@ -1227,6 +1242,10 @@ function syncResultPhaseUI() {
       els.subsFirstStart.value = String(Math.round(t0 * 100) / 100);
     }
   }
+
+  const showClearPreview = Boolean(resultUrl || previewBlob);
+  if (els.btnClearPreview) els.btnClearPreview.hidden = !showClearPreview;
+  if (els.btnClearPreviewCollapsed) els.btnClearPreviewCollapsed.hidden = !showClearPreview;
 }
 
 /** Collapse preview UI but keep blob URLs so user can restore. */
@@ -1293,10 +1312,15 @@ function enableSubtitleTrack() {
 }
 
 /**
- * Discard preview / formal video only.
- * 語音稿與字幕軸保留，直到使用者按「清除稿件」。
+ * Discard preview / formal video.
+ * @param {{ clearStorage?: boolean, keepSubtitleData?: boolean }} [opts]
+ *  - clearStorage: also remove IndexedDB preview (manual 清除預覽 / 清除全部)
+ *  - keepSubtitleData: keep lastChunks/SRT (default true except full wipe)
  */
-function revokeResult() {
+function revokeResult(opts = {}) {
+  const clearStorage = Boolean(opts.clearStorage);
+  const keepSubtitleData = opts.keepSubtitleData !== false;
+
   if (resultUrl) {
     URL.revokeObjectURL(resultUrl);
     resultUrl = null;
@@ -1307,23 +1331,23 @@ function revokeResult() {
   }
   previewBlob = null;
   hasFinalExport = false;
-  // Soft track URLs recreated on next preview; revoke blob URLs to free memory
-  // but keep lastSrtText / lastChunks / script in memory + localStorage
-  if (lastSrtUrl) {
-    URL.revokeObjectURL(lastSrtUrl);
-    lastSrtUrl = null;
-  }
+
   if (lastVttUrl) {
     URL.revokeObjectURL(lastVttUrl);
     lastVttUrl = null;
   }
+  // Keep lastSrtText for download when keepSubtitleData; only drop blob URL of SRT file
+  if (lastSrtUrl) {
+    URL.revokeObjectURL(lastSrtUrl);
+    lastSrtUrl = null;
+  }
+
   els.resultVideo.removeAttribute('src');
   if (els.resultTrack) {
     els.resultTrack.removeAttribute('src');
     els.resultTrack.default = false;
     els.resultTrack.hidden = true;
   }
-  // UI tied to video preview only
   if (els.btnDownloadCollapsed) {
     els.btnDownloadCollapsed.removeAttribute('href');
     els.btnDownloadCollapsed.hidden = true;
@@ -1337,28 +1361,132 @@ function revokeResult() {
     els.btnDownload.hidden = true;
     els.btnDownload.removeAttribute('href');
   }
+  if (els.btnClearPreview) els.btnClearPreview.hidden = true;
+  if (els.btnClearPreviewCollapsed) els.btnClearPreviewCollapsed.hidden = true;
   if (els.workflowSteps) els.workflowSteps.hidden = true;
   if (els.exportStatusHint) {
     els.exportStatusHint.hidden = true;
     els.exportStatusHint.textContent = '';
   }
-  // Keep SRT download if we still have subtitle text from last session
-  setSrtDownloadVisible(Boolean(lastSrtText?.trim()));
-  if (els.subsPreview && lastChunks?.length) {
-    els.subsPreview.hidden = false;
+
+  if (!keepSubtitleData) {
+    // only when explicitly clearing preview session with subtitles? usually keep script subs
   }
-  if (els.subsResultHint && lastChunks?.length) {
+
+  setSrtDownloadVisible(Boolean(lastSrtText?.trim()) && keepSubtitleData);
+  if (els.subsPreview && lastChunks?.length && keepSubtitleData) {
+    els.subsPreview.hidden = false;
+  } else if (els.subsPreview && !keepSubtitleData) {
+    els.subsPreview.hidden = true;
+  }
+  if (els.subsResultHint && lastChunks?.length && keepSubtitleData) {
     els.subsResultHint.hidden = false;
     els.subsResultHint.textContent =
-      `已保留上次語音稿字幕（${lastChunks.length} 句）。清除影片後稿件與時間軸仍在；按「清除稿件」才會刪掉。`;
+      `字幕時間軸仍保留（${lastChunks.length} 句）。重新「產生預覽」可套回影片，或按「清除預覽」一併清掉畫面。`;
   }
 
   els.resultVideo.load();
   els.resultBlock.classList.remove('is-visible', 'is-collapsed');
   if (els.resultCollapsed) els.resultCollapsed.hidden = true;
   if (els.resultBody) els.resultBody.hidden = false;
-  isSubtitlePreviewMode = Boolean(lastChunks?.length);
+  isSubtitlePreviewMode = Boolean(keepSubtitleData && lastChunks?.length);
+
+  if (clearStorage) {
+    clearStoredPreview().catch(() => {});
+  }
+
   syncResultPhaseUI();
+}
+
+/** User clicked 清除預覽 — drop video + hide result; script/subtitle data stays. */
+function clearPreviewManually() {
+  if (merging || exporting) return;
+  try {
+    els.resultVideo.pause();
+  } catch {
+    /* ignore */
+  }
+  revokeResult({ clearStorage: true, keepSubtitleData: true });
+  toast('已清除預覽影片（字幕稿與時間軸仍保留，可再產生預覽）', 'success');
+}
+
+/**
+ * Persist current preview blob for reload.
+ */
+function persistPreviewBlob(blob, hasSubtitles) {
+  if (!(blob instanceof Blob) || !blob.size) return;
+  savePreview(blob, {
+    hasSubtitles,
+    filename: `preview-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.mp4`,
+  }).catch((err) => console.warn('無法保存預覽影片', err));
+}
+
+/**
+ * Restore preview video + timeline UI from IndexedDB / localStorage.
+ */
+async function restorePreviewFromStore() {
+  try {
+    const stored = await loadPreview();
+    if (!stored?.blob) return false;
+
+    previewBlob = stored.blob;
+    if (resultUrl) URL.revokeObjectURL(resultUrl);
+    resultUrl = URL.createObjectURL(stored.blob);
+    hasFinalExport = false;
+
+    const hasSubs = Boolean(
+      stored.hasSubtitles && lastChunks?.length && lastSrtText?.trim(),
+    );
+    isSubtitlePreviewMode = hasSubs || Boolean(lastChunks?.length);
+
+    els.resultVideo.src = resultUrl;
+    if (els.btnDownloadPreview) {
+      els.btnDownloadPreview.href = resultUrl;
+      els.btnDownloadPreview.download = stored.filename || 'preview.mp4';
+    }
+
+    if (lastChunks?.length) {
+      publishSubtitleOutputs({ silentInvalidate: true, fromTimeline: false });
+      if (els.subsPreview) els.subsPreview.hidden = false;
+      if (els.subsResultHint) {
+        els.subsResultHint.hidden = false;
+        els.subsResultHint.textContent =
+          `已還原上次預覽影片與字幕時間軸（${lastChunks.length} 句）。可繼續調整或正式輸出；重新「產生預覽」會覆蓋影片。`;
+      }
+      setSrtDownloadVisible(true);
+      const tl = ensureSubtitleTimeline();
+      tl?.bindVideo();
+      requestAnimationFrame(() => {
+        tl?.fit();
+        tl?.render();
+        setTimeout(() => {
+          tl?.fit();
+          tl?.render();
+        }, 400);
+      });
+    } else if (!stored.hasSubtitles) {
+      isSubtitlePreviewMode = false;
+      if (els.btnDownload) {
+        els.btnDownload.hidden = false;
+        els.btnDownload.href = resultUrl;
+        els.btnDownload.textContent = '下載合併影片';
+      }
+    }
+
+    els.resultBlock.classList.add('is-visible');
+    els.resultBlock.classList.remove('is-collapsed');
+    if (els.resultCollapsed) els.resultCollapsed.hidden = true;
+    if (els.resultBody) els.resultBody.hidden = false;
+    if (els.btnClearPreview) els.btnClearPreview.hidden = false;
+    if (els.btnClearPreviewCollapsed) els.btnClearPreviewCollapsed.hidden = false;
+
+    syncResultPhaseUI();
+    toast('已還原上次預覽影片與時間軸', 'info');
+    return true;
+  } catch (err) {
+    console.warn('還原預覽失敗', err);
+    return false;
+  }
 }
 
 /**
@@ -1418,10 +1546,11 @@ async function applyPreviewOffset() {
 }
 
 /**
- * Set absolute start time of the first cue (converts to global offset vs base).
+ * Set first cue start time and ripple-shift all later cues by the same delta.
+ * Example: first was 0s → set 6s ⇒ every cue +6s.
  */
 async function applyFirstStart() {
-  if (!savedBaseChunks?.length) {
+  if (!lastChunks?.length) {
     toast('目前沒有字幕可調整', 'error');
     return;
   }
@@ -1430,29 +1559,45 @@ async function applyFirstStart() {
     toast('請輸入有效的第一句開始秒數', 'error');
     return;
   }
-  const baseFirst = Number(savedBaseChunks[0].timestamp?.[0]) || 0;
-  // Keep partial offset; only recompute global so first cue lands on target
-  // first_after_global = baseFirst + global  (then partial may shift from later lines)
-  // If partial starts at 0, first cue also gets partialDelta — account for that
-  let partialOnFirst = 0;
-  if (previewPartialFrom <= 0 && previewPartialDelta) {
-    partialOnFirst = previewPartialDelta;
+  const currentFirst = Number(lastChunks[0].timestamp?.[0]) || 0;
+  let delta = target - currentFirst;
+  if (Math.abs(delta) < 0.001) {
+    toast('第一句已在該時間', 'info');
+    return;
   }
-  const global = target - baseFirst - partialOnFirst;
-  if (els.subsAdjustOffset) {
-    els.subsAdjustOffset.value = String(Math.round(global * 100) / 100);
+
+  const maxDur = lastTotalDur || lastCycleDur || 0;
+  // Keep all cues in range when possible
+  for (const c of lastChunks) {
+    const s = Number(c.timestamp[0]) || 0;
+    const e = Number(c.timestamp[1]) || 0;
+    if (s + delta < 0) delta = Math.max(delta, -s);
+    if (maxDur > 0 && e + delta > maxDur) delta = Math.min(delta, maxDur - e);
   }
-  await recomputePreviewChunks({ global });
+  delta = Math.round(delta * 100) / 100;
+
+  const next = lastChunks.map((c) => ({
+    timestamp: [
+      (Number(c.timestamp[0]) || 0) + delta,
+      (Number(c.timestamp[1]) || 0) + delta,
+    ],
+    text: c.text,
+  }));
+  commitFreeTimelineChunks(next);
+  ensureSubtitleTimeline()?.render();
 
   const actual = lastChunks?.[0]?.timestamp?.[0] ?? target;
+  const sign = delta >= 0 ? '+' : '';
   if (els.subsFirstHint) {
-    els.subsFirstHint.textContent = `第一句已對到 ${Number(actual).toFixed(2)}s`;
+    els.subsFirstHint.textContent = `第一句 @ ${Number(actual).toFixed(2)}s，後句已自動 ${sign}${delta.toFixed(2)}s`;
   }
-  if (els.subsAdjustHint) {
-    const sign = global >= 0 ? '+' : '';
-    els.subsAdjustHint.textContent = `對應整體偏移 ${sign}${global.toFixed(2)}s`;
+  if (els.subsAdjustOffset) {
+    els.subsAdjustOffset.value = '0';
   }
-  toast(`第一句字幕改為 ${Number(actual).toFixed(2)}s`, 'success');
+  toast(
+    `第一句改為 ${Number(actual).toFixed(2)}s，其餘 ${lastChunks.length - 1} 句已自動平移 ${sign}${delta.toFixed(2)}s`,
+    'success',
+  );
 }
 
 /**
@@ -1828,9 +1973,7 @@ function addFiles(fileList) {
     return;
   }
 
-  // Only drop previous preview video; keep clip list (append) and 語音稿字幕
-  revokeResult();
-
+  // Keep existing preview until user regenerates or clears it
   const newClips = files.map((file) => ({
     id: uid(),
     file,
@@ -1873,7 +2016,7 @@ function removeClip(id) {
   schedulePersistClips();
   if (clips.length === 0) {
     clearClips().catch(() => {});
-    revokeResult();
+    // Preview kept until user clears it or regenerates
   }
 }
 
@@ -1886,11 +2029,11 @@ function clearAll() {
   clearLoopOptions();
   syncExtendUI();
   renderClips();
-  revokeResult();
+  revokeResult({ clearStorage: true, keepSubtitleData: true });
   els.progressBlock.classList.remove('is-visible');
   els.logBox.hidden = true;
   els.logBox.textContent = '';
-  toast('已手動清除影片、音軌與目標時長設定', 'success');
+  toast('已手動清除影片、音軌、目標時長與預覽', 'success');
 }
 
 /**
@@ -1922,7 +2065,8 @@ async function runMerge() {
   if (ready.length === 0 || merging) return;
 
   merging = true;
-  revokeResult();
+  // Regenerating preview replaces previous preview video
+  revokeResult({ clearStorage: true, keepSubtitleData: true });
   updateToolbar();
   renderClips();
 
@@ -2210,6 +2354,7 @@ async function runMerge() {
       finalUrl = null;
     }
     els.resultVideo.src = resultUrl;
+    persistPreviewBlob(blob, Boolean(wantSubs && subtitleSrt?.trim()));
 
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     if (els.btnDownload) {
@@ -2305,11 +2450,13 @@ async function runMerge() {
     els.resultBlock.classList.remove('is-collapsed');
     if (els.resultCollapsed) els.resultCollapsed.hidden = true;
     if (els.resultBody) els.resultBody.hidden = false;
+    if (els.btnClearPreview) els.btnClearPreview.hidden = false;
+    if (els.btnClearPreviewCollapsed) els.btnClearPreviewCollapsed.hidden = false;
     syncResultPhaseUI();
     toast(
       wantSubs
-        ? '預覽已就緒：用時間軸拖曳對字幕，再正式輸出'
-        : '合併完成，可預覽或下載',
+        ? '預覽已就緒（會保留到重新產生或清除預覽）'
+        : '合併完成，可預覽或下載（會保留到清除預覽）',
       'success',
     );
     els.resultBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -2338,6 +2485,8 @@ els.btnClear.addEventListener('click', clearAll);
 els.btnMerge.addEventListener('click', runMerge);
 els.btnDismissResult.addEventListener('click', hideResultPreview);
 els.btnShowResult.addEventListener('click', showResultPreview);
+els.btnClearPreview?.addEventListener('click', () => clearPreviewManually());
+els.btnClearPreviewCollapsed?.addEventListener('click', () => clearPreviewManually());
 els.btnExportFinal?.addEventListener('click', () => runFormalExport());
 els.btnSubsAdjust?.addEventListener('click', () => applyPreviewOffset());
 els.subsAdjustOffset?.addEventListener('keydown', (e) => {
@@ -2517,6 +2666,10 @@ if (hadLoop && getLoopMode() === 'duration') {
     console.info(`已還原目標時長：${formatDuration(t)}`);
   }
 }
-// Restore 加入的影片 + 自訂音軌（直到手動清除）
-restoreClipsFromStore();
-restoreAudioFromStore();
+// Restore 加入的影片 + 自訂音軌 + 預覽影片／時間軸（直到重新產生或清除預覽）
+(async () => {
+  await restoreClipsFromStore();
+  await restoreAudioFromStore();
+  // Script/subs restored earlier; attach preview video last
+  await restorePreviewFromStore();
+})();
