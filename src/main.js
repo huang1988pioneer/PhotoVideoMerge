@@ -135,10 +135,6 @@ app.innerHTML = `
           <input type="checkbox" id="opt-no-audio" />
           <span>不要聲音</span>
         </label>
-        <div class="toolbar-spacer"></div>
-        <button type="button" class="btn btn-primary" id="btn-merge" disabled>
-          產生預覽
-        </button>
       </div>
 
       <div class="extend-panel" aria-labelledby="extend-title">
@@ -290,6 +286,16 @@ app.innerHTML = `
         </div>
       </div>
 
+      <div class="merge-action" id="merge-action">
+        <div class="merge-action-text">
+          <strong>準備就緒後產生預覽</strong>
+          <span class="field-hint" id="merge-action-hint">先設定延長、音軌與字幕，再按下方按鈕（尚未正式輸出）</span>
+        </div>
+        <button type="button" class="btn btn-primary btn-merge-cta" id="btn-merge" disabled>
+          產生預覽
+        </button>
+      </div>
+
       <div class="progress-block" id="progress-block" aria-live="polite">
         <div class="progress-label">
           <strong id="progress-status">準備中…</strong>
@@ -397,7 +403,10 @@ app.innerHTML = `
                 <span class="field-hint" id="subs-partial-hint">可在全體偏移之上，對後半段再細調</span>
               </div>
             </details>
-            <pre class="subs-preview-body" id="subs-preview-body"></pre>
+            <details class="subs-srt-raw">
+              <summary>原始 SRT 文字（除錯用）</summary>
+              <pre class="subs-preview-body" id="subs-preview-body"></pre>
+            </details>
           </div>
           <div class="result-actions" id="result-actions">
             <button type="button" class="btn btn-primary" id="btn-export-final" hidden>
@@ -429,6 +438,7 @@ const els = {
   btnAddMore: document.getElementById('btn-add-more'),
   btnClear: document.getElementById('btn-clear'),
   btnMerge: document.getElementById('btn-merge'),
+  mergeActionHint: document.getElementById('merge-action-hint'),
   optNoAudio: document.getElementById('opt-no-audio'),
   loopCount: document.getElementById('loop-count'),
   loopHours: document.getElementById('loop-hours'),
@@ -1636,6 +1646,18 @@ function updateToolbar() {
         ? '合併中…'
         : '合併為一個影片';
   }
+  if (els.mergeActionHint) {
+    if (ready.length === 0) {
+      els.mergeActionHint.textContent = '請先加入至少一段影片，並完成上方延長／音軌／字幕設定';
+    } else if (clips.some((c) => c.status === 'loading')) {
+      els.mergeActionHint.textContent = '影片影格載入中，請稍候…';
+    } else if (wantsSubtitleWorkflow()) {
+      els.mergeActionHint.textContent =
+        '將產生可調字幕的預覽（尚未正式輸出）；調好時間軸後再按「正式輸出影片」';
+    } else {
+      els.mergeActionHint.textContent = '將依上方設定合併為一個影片，完成後可預覽與下載';
+    }
+  }
   if (els.btnExportFinal) {
     els.btnExportFinal.disabled = busy || !previewBlob || !lastSrtText;
   }
@@ -2236,7 +2258,8 @@ async function runMerge() {
 
       els.subsResultHint.hidden = false;
       els.subsResultHint.textContent =
-        `已產生 ${subChunkCount} 句字幕（僅預覽）。請用下方工具對齊時間軸，確認後再按「正式輸出影片」。` +
+        `已產生 ${subChunkCount} 句字幕（僅預覽）— 下方時間軸與清單各 ${subChunkCount} 列（一句一列）。` +
+        ` 請對齊時間軸後再按「正式輸出影片」。` +
         (lastChunks?.[0]
           ? ` 目前第一句 @ ${Number(lastChunks[0].timestamp[0]).toFixed(2)}s。`
           : '');

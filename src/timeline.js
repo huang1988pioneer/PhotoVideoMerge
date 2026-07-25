@@ -1,5 +1,5 @@
 /**
- * Graphical subtitle timeline (NLE-style): ruler, playhead, draggable / resizable cues.
+ * Graphical subtitle timeline (NLE-style): one row per cue.
  * Inspired by CapCut / Premiere / DaVinci / FCP / PowerDirector / Filmora.
  */
 
@@ -26,7 +26,9 @@ export function createSubtitleTimeline(root, opts) {
   let snapEnabled = true;
   const SNAP = 0.05;
   const MIN_CUE = 0.2;
-  const LABEL_W = 56;
+  /** Left label column width (px) — room for # + text */
+  const LABEL_W = 200;
+  const ROW_H = 36;
 
   /** @type {null | { mode: 'move'|'start'|'end', idx: number, startX: number, origS: number, origE: number, pointerId: number }} */
   let drag = null;
@@ -36,7 +38,7 @@ export function createSubtitleTimeline(root, opts) {
     <div class="tl-toolbar">
       <div class="tl-toolbar-left">
         <span class="tl-toolbar-title">字幕時間軸</span>
-        <span class="tl-toolbar-hint">拖曳片段移動 · 左右手柄改起迄 · 點時間尺跳播</span>
+        <span class="tl-toolbar-hint" data-tl="count-hint">每句一列 · 拖曳色塊移動 · 左右手柄改起迄</span>
       </div>
       <div class="tl-toolbar-right">
         <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-out" title="縮小">−</button>
@@ -48,18 +50,24 @@ export function createSubtitleTimeline(root, opts) {
         </label>
       </div>
     </div>
-    <div class="tl-scroll" data-tl="scroll" tabindex="0" role="region" aria-label="字幕時間軸">
+    <div class="tl-scroll" data-tl="scroll" tabindex="0" role="region" aria-label="字幕時間軸（每句一列）">
       <div class="tl-canvas" data-tl="canvas">
         <div class="tl-ruler" data-tl="ruler"></div>
-        <div class="tl-lanes">
-          <div class="tl-lane-label" aria-hidden="true">字幕</div>
-          <div class="tl-track" data-tl="track"></div>
-        </div>
+        <div class="tl-rows" data-tl="rows"></div>
         <div class="tl-playhead" data-tl="playhead" aria-hidden="true">
           <div class="tl-playhead-head"></div>
           <div class="tl-playhead-line"></div>
         </div>
       </div>
+    </div>
+    <div class="tl-cue-list-wrap">
+      <div class="tl-cue-list-head">
+        <span>句序</span>
+        <span>開始</span>
+        <span>結束</span>
+        <span>字幕文字（一列一句）</span>
+      </div>
+      <div class="tl-cue-list" data-tl="cue-list" role="list"></div>
     </div>
     <div class="tl-inspector" data-tl="inspector" hidden>
       <div class="tl-inspector-row">
@@ -87,7 +95,9 @@ export function createSubtitleTimeline(root, opts) {
     scroll: root.querySelector('[data-tl="scroll"]'),
     canvas: root.querySelector('[data-tl="canvas"]'),
     ruler: root.querySelector('[data-tl="ruler"]'),
-    track: root.querySelector('[data-tl="track"]'),
+    rows: root.querySelector('[data-tl="rows"]'),
+    cueList: root.querySelector('[data-tl="cue-list"]'),
+    countHint: root.querySelector('[data-tl="count-hint"]'),
     playhead: root.querySelector('[data-tl="playhead"]'),
     inspector: root.querySelector('[data-tl="inspector"]'),
     selIdx: root.querySelector('[data-tl="sel-idx"]'),
@@ -133,13 +143,24 @@ export function createSubtitleTimeline(root, opts) {
   }
 
   function tickStep() {
-    // Aim ~80px between major ticks
     const target = 80 / pxPerSec;
     const steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120];
     for (const s of steps) {
       if (s >= target) return s;
     }
     return 120;
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function round2(n) {
+    return Math.round(n * 100) / 100;
   }
 
   function renderRuler(dur) {
@@ -162,17 +183,44 @@ export function createSubtitleTimeline(root, opts) {
     el.ruler.style.width = `${w}px`;
   }
 
-  function renderClips() {
+  function renderRows() {
     const chunks = opts.getChunks() || [];
     const dur = duration();
-    el.track.style.width = `${dur * pxPerSec}px`;
-    el.track.innerHTML = '';
+    const trackW = dur * pxPerSec;
+
+    if (el.countHint) {
+      el.countHint.textContent = chunks.length
+        ? `共 ${chunks.length} 句 · 每句獨立一列（非擠在同一列）`
+        : '每句一列 · 拖曳色塊移動 · 左右手柄改起迄';
+    }
+
+    el.rows.innerHTML = '';
+    el.rows.style.minHeight = `${Math.max(ROW_H, chunks.length * ROW_H)}px`;
 
     chunks.forEach((c, i) => {
       const s = Number(c.timestamp?.[0]) || 0;
       const e = Number(c.timestamp?.[1]) || s + MIN_CUE;
       const left = s * pxPerSec;
-      const width = Math.max(6, (e - s) * pxPerSec);
+      const width = Math.max(8, (e - s) * pxPerSec);
+
+      const row = document.createElement('div');
+      row.className = 'tl-row' + (i === selectedIdx ? ' is-selected' : '');
+      row.dataset.idx = String(i);
+      row.style.height = `${ROW_H}px`;
+
+      const label = document.createElement('div');
+      label.className = 'tl-row-label';
+      label.style.width = `${LABEL_W}px`;
+      label.innerHTML = `
+        <span class="tl-row-num">${i + 1}</span>
+        <span class="tl-row-text" title="${escapeHtml(c.text || '')}">${escapeHtml(c.text || '')}</span>
+      `;
+      label.title = `#${i + 1}  ${formatTime(s)} – ${formatTime(e)}`;
+
+      const track = document.createElement('div');
+      track.className = 'tl-row-track';
+      track.style.width = `${trackW}px`;
+
       const clip = document.createElement('div');
       clip.className = 'tl-clip' + (i === selectedIdx ? ' is-selected' : '');
       clip.style.left = `${left}px`;
@@ -182,21 +230,36 @@ export function createSubtitleTimeline(root, opts) {
       clip.innerHTML = `
         <div class="tl-handle tl-handle-start" data-handle="start" title="調整開始"></div>
         <div class="tl-clip-body">
-          <span class="tl-clip-num">${i + 1}</span>
-          <span class="tl-clip-text">${escapeHtml(c.text || '')}</span>
+          <span class="tl-clip-range">${formatTime(s)}–${formatTime(e)}</span>
         </div>
         <div class="tl-handle tl-handle-end" data-handle="end" title="調整結束"></div>
       `;
-      el.track.appendChild(clip);
-    });
-  }
+      track.appendChild(clip);
 
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      row.appendChild(label);
+      row.appendChild(track);
+      el.rows.appendChild(row);
+    });
+
+    // Cue list table — one DOM row per subtitle
+    if (el.cueList) {
+      el.cueList.innerHTML = '';
+      chunks.forEach((c, i) => {
+        const s = Number(c.timestamp?.[0]) || 0;
+        const e = Number(c.timestamp?.[1]) || s + MIN_CUE;
+        const item = document.createElement('div');
+        item.className = 'tl-cue-row' + (i === selectedIdx ? ' is-selected' : '');
+        item.dataset.idx = String(i);
+        item.setAttribute('role', 'listitem');
+        item.innerHTML = `
+          <span class="tl-cue-num">${i + 1}</span>
+          <span class="tl-cue-time">${formatTime(s)}</span>
+          <span class="tl-cue-time">${formatTime(e)}</span>
+          <span class="tl-cue-text">${escapeHtml(c.text || '')}</span>
+        `;
+        el.cueList.appendChild(item);
+      });
+    }
   }
 
   function updateInspector() {
@@ -216,28 +279,31 @@ export function createSubtitleTimeline(root, opts) {
     el.selDur.textContent = `長度 ${(e - s).toFixed(2)}s`;
   }
 
-  function round2(n) {
-    return Math.round(n * 100) / 100;
-  }
-
   function commitChunks(next) {
-    opts.onChange(next.map((c) => ({
-      timestamp: [c.timestamp[0], c.timestamp[1]],
-      text: c.text,
-    })));
+    opts.onChange(
+      next.map((c) => ({
+        timestamp: [c.timestamp[0], c.timestamp[1]],
+        text: c.text,
+      })),
+    );
     render();
   }
 
   function select(idx) {
     selectedIdx = idx;
-    renderClips();
+    renderRows();
     updateInspector();
+    // Scroll list row into view
+    const listRow = el.cueList?.querySelector(`.tl-cue-row[data-idx="${idx}"]`);
+    listRow?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const tlRow = el.rows?.querySelector(`.tl-row[data-idx="${idx}"]`);
+    tlRow?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
   function render() {
     const dur = duration();
     renderRuler(dur);
-    renderClips();
+    renderRows();
     updateInspector();
     const video = opts.getVideo?.();
     setPlayhead(video?.currentTime || 0);
@@ -252,14 +318,16 @@ export function createSubtitleTimeline(root, opts) {
     }
   }
 
-  function timeFromClientX(clientX) {
-    const trackRect = el.track.getBoundingClientRect();
+  function timeFromClientX(clientX, trackEl) {
+    const track = trackEl || el.rows?.querySelector('.tl-row-track');
+    if (!track) return 0;
+    const trackRect = track.getBoundingClientRect();
     const localX = clientX - trackRect.left;
     return Math.max(0, localX / pxPerSec);
   }
 
-  function seekFromEvent(e) {
-    const t = snap(timeFromClientX(e.clientX));
+  function seekFromEvent(e, trackEl) {
+    const t = snap(timeFromClientX(e.clientX, trackEl));
     const video = opts.getVideo?.();
     if (video && Number.isFinite(video.duration)) {
       video.currentTime = Math.min(video.duration, Math.max(0, t));
@@ -279,10 +347,9 @@ export function createSubtitleTimeline(root, opts) {
   });
   root.querySelector('[data-tl="fit"]')?.addEventListener('click', () => fit());
   root.querySelector('[data-tl="snap"]')?.addEventListener('change', (e) => {
-    snapEnabled = Boolean(e.target.checked);
+    snapEnabled = Boolean(/** @type {HTMLInputElement} */ (e.target).checked);
   });
 
-  // —— Scroll wheel zoom (Ctrl / Meta) ——
   el.scroll.addEventListener(
     'wheel',
     (e) => {
@@ -291,7 +358,6 @@ export function createSubtitleTimeline(root, opts) {
       const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
       const prev = pxPerSec;
       pxPerSec = Math.min(240, Math.max(6, pxPerSec * factor));
-      // Keep pointer time under cursor roughly stable
       const t = timeFromClientX(e.clientX);
       render();
       const newX = LABEL_W + t * pxPerSec;
@@ -301,45 +367,78 @@ export function createSubtitleTimeline(root, opts) {
     { passive: false },
   );
 
-  // —— Click ruler / empty track to seek ——
   el.ruler.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     seekFromEvent(e);
   });
-  el.track.addEventListener('pointerdown', (e) => {
+
+  // Row / clip / list interactions (delegated)
+  el.rows.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    if (e.target.closest('.tl-clip')) return;
-    seekFromEvent(e);
-    select(-1);
+    const handle = /** @type {HTMLElement|null} */ (e.target.closest?.('[data-handle]'));
+    const clip = /** @type {HTMLElement|null} */ (e.target.closest?.('.tl-clip'));
+    const row = /** @type {HTMLElement|null} */ (e.target.closest?.('.tl-row'));
+    const track = /** @type {HTMLElement|null} */ (e.target.closest?.('.tl-row-track'));
+
+    if (clip) {
+      e.preventDefault();
+      e.stopPropagation();
+      const idx = Number(clip.dataset.idx);
+      const chunks = opts.getChunks() || [];
+      if (!Number.isFinite(idx) || !chunks[idx]) return;
+      select(idx);
+      const mode =
+        handle?.getAttribute('data-handle') === 'start'
+          ? 'start'
+          : handle?.getAttribute('data-handle') === 'end'
+            ? 'end'
+            : 'move';
+      const c = chunks[idx];
+      drag = {
+        mode,
+        idx,
+        startX: e.clientX,
+        origS: Number(c.timestamp[0]) || 0,
+        origE: Number(c.timestamp[1]) || 0,
+        pointerId: e.pointerId,
+      };
+      clip.setPointerCapture?.(e.pointerId);
+      return;
+    }
+
+    if (row && track) {
+      const idx = Number(row.dataset.idx);
+      if (Number.isFinite(idx)) select(idx);
+      seekFromEvent(e, track);
+    }
   });
 
-  // —— Clip interaction ——
-  el.track.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    const handle = e.target.closest('[data-handle]');
-    const clip = e.target.closest('.tl-clip');
-    if (!clip) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const idx = Number(clip.dataset.idx);
+  el.rows.addEventListener('dblclick', (e) => {
+    const clip = /** @type {HTMLElement|null} */ (e.target.closest?.('.tl-clip'));
+    const row = /** @type {HTMLElement|null} */ (e.target.closest?.('.tl-row'));
+    const idx = Number(clip?.dataset.idx ?? row?.dataset.idx);
     const chunks = opts.getChunks() || [];
-    if (!Number.isFinite(idx) || !chunks[idx]) return;
-    select(idx);
-    const mode = handle?.getAttribute('data-handle') === 'start'
-      ? 'start'
-      : handle?.getAttribute('data-handle') === 'end'
-        ? 'end'
-        : 'move';
     const c = chunks[idx];
-    drag = {
-      mode,
-      idx,
-      startX: e.clientX,
-      origS: Number(c.timestamp[0]) || 0,
-      origE: Number(c.timestamp[1]) || 0,
-      pointerId: e.pointerId,
-    };
-    clip.setPointerCapture?.(e.pointerId);
+    if (!c) return;
+    const t = Number(c.timestamp[0]) || 0;
+    const video = opts.getVideo?.();
+    if (video) video.currentTime = t;
+    opts.onSeek?.(t);
+    setPlayhead(t);
+  });
+
+  el.cueList?.addEventListener('click', (e) => {
+    const row = /** @type {HTMLElement|null} */ (e.target.closest?.('.tl-cue-row'));
+    if (!row) return;
+    const idx = Number(row.dataset.idx);
+    if (!Number.isFinite(idx)) return;
+    select(idx);
+    const chunks = opts.getChunks() || [];
+    const t = Number(chunks[idx]?.timestamp?.[0]) || 0;
+    const video = opts.getVideo?.();
+    if (video) video.currentTime = t;
+    opts.onSeek?.(t);
+    setPlayhead(t);
   });
 
   window.addEventListener('pointermove', (e) => {
@@ -379,7 +478,6 @@ export function createSubtitleTimeline(root, opts) {
     }
     [s, end] = clampCue(s, end, maxDur);
     next[drag.idx] = { timestamp: [s, end], text: next[drag.idx].text };
-    // Live visual without full onChange until pointerup (avoid thrashing track reattach)
     livePaint(next);
     if (selectedIdx === drag.idx) {
       el.selStart.value = String(round2(s));
@@ -390,22 +488,21 @@ export function createSubtitleTimeline(root, opts) {
   });
 
   function livePaint(chunks) {
-    const nodes = el.track.querySelectorAll('.tl-clip');
     chunks.forEach((c, i) => {
-      const node = nodes[i];
-      if (!node) return;
+      const clip = el.rows.querySelector(`.tl-clip[data-idx="${i}"]`);
+      if (!clip) return;
       const s = Number(c.timestamp[0]) || 0;
       const e = Number(c.timestamp[1]) || s + MIN_CUE;
-      node.style.left = `${s * pxPerSec}px`;
-      node.style.width = `${Math.max(6, (e - s) * pxPerSec)}px`;
+      /** @type {HTMLElement} */ (clip).style.left = `${s * pxPerSec}px`;
+      /** @type {HTMLElement} */ (clip).style.width = `${Math.max(8, (e - s) * pxPerSec)}px`;
+      const range = clip.querySelector('.tl-clip-range');
+      if (range) range.textContent = `${formatTime(s)}–${formatTime(e)}`;
     });
   }
 
-  window.addEventListener('pointerup', (e) => {
+  window.addEventListener('pointerup', () => {
     if (!drag) return;
-    if (drag._live) {
-      commitChunks(drag._live);
-    }
+    if (drag._live) commitChunks(drag._live);
     drag = null;
   });
   window.addEventListener('pointercancel', () => {
@@ -413,22 +510,6 @@ export function createSubtitleTimeline(root, opts) {
     render();
   });
 
-  // Double-click clip → seek to start
-  el.track.addEventListener('dblclick', (e) => {
-    const clip = e.target.closest('.tl-clip');
-    if (!clip) return;
-    const idx = Number(clip.dataset.idx);
-    const chunks = opts.getChunks() || [];
-    const c = chunks[idx];
-    if (!c) return;
-    const t = Number(c.timestamp[0]) || 0;
-    const video = opts.getVideo?.();
-    if (video) video.currentTime = t;
-    opts.onSeek?.(t);
-    setPlayhead(t);
-  });
-
-  // Inspector apply
   root.querySelector('[data-tl="sel-apply"]')?.addEventListener('click', () => {
     const chunks = opts.getChunks();
     if (!chunks?.length || selectedIdx < 0) return;
@@ -455,7 +536,6 @@ export function createSubtitleTimeline(root, opts) {
     setPlayhead(t);
   });
 
-  // Keyboard nudge when timeline focused
   el.scroll.addEventListener('keydown', (e) => {
     const chunks = opts.getChunks();
     if (!chunks?.length || selectedIdx < 0) return;
@@ -463,7 +543,15 @@ export function createSubtitleTimeline(root, opts) {
     let ds = 0;
     if (e.key === 'ArrowLeft') ds = -step;
     else if (e.key === 'ArrowRight') ds = step;
-    else return;
+    else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      select(Math.max(0, selectedIdx - 1));
+      return;
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      select(Math.min(chunks.length - 1, selectedIdx + 1));
+      return;
+    } else return;
     e.preventDefault();
     const maxDur = duration();
     const next = chunks.map((c) => ({
@@ -486,7 +574,6 @@ export function createSubtitleTimeline(root, opts) {
     commitChunks(next);
   });
 
-  // Video playhead sync
   let raf = 0;
   /** @type {WeakSet<HTMLVideoElement>} */
   const boundVideos = new WeakSet();
@@ -510,10 +597,7 @@ export function createSubtitleTimeline(root, opts) {
     video.addEventListener('loadedmetadata', () => render());
   }
 
-  // Resize observer for fit on first show
-  const ro = new ResizeObserver(() => {
-    // keep current zoom; only ensure playhead visible area updates
-  });
+  const ro = new ResizeObserver(() => {});
   ro.observe(el.scroll);
 
   return {
