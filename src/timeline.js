@@ -51,8 +51,9 @@ export function createSubtitleTimeline(root, opts) {
   const MIN_CUE = 0.2;
   const CHAIN_GAP = 0.06;
   /** Left label column width (px) — room for # + text */
-  const LABEL_W = 200;
-  const ROW_H = 36;
+  const LABEL_W = 260;
+  /** Taller rows so clips / text are easier to grab and read */
+  const ROW_H = 52;
 
   /**
    * @typedef {{
@@ -69,22 +70,25 @@ export function createSubtitleTimeline(root, opts) {
   /** @type {DragState | null} */
   let drag = null;
 
+  /** Active view window preset in seconds; null = free zoom; 0 = full duration */
+  let viewWindowSec = 0; // 0 = 全長
+
   root.classList.add('tl-editor');
   if (!root.hasAttribute('tabindex')) root.tabIndex = 0;
   root.innerHTML = `
     <div class="tl-toolbar">
       <div class="tl-toolbar-left">
         <span class="tl-toolbar-title">字幕時間軸</span>
-        <span class="tl-toolbar-hint" data-tl="count-hint">每句一列 · +/− 放大縮小 · Ctrl+滾輪縮放</span>
+        <span class="tl-toolbar-hint" data-tl="count-hint">預設全長顯示 · 可縮放為 10 秒／30 秒視窗</span>
       </div>
       <div class="tl-toolbar-right">
         <button type="button" class="btn btn-ghost btn-sm" data-tl="undo" title="復原 (Ctrl+Z)" disabled>復原</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="redo" title="重做 (Ctrl+Y)" disabled>重做</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="restore-base" title="還原至產生預覽時的時間軸" disabled>還原產生時</button>
-        <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-out" title="縮小時間軸 ( − 或 Ctrl+滾輪 )">−</button>
-        <span class="tl-zoom-readout" data-tl="zoom-readout" title="目前縮放（像素/秒）">48 px/s</span>
-        <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-in" title="放大時間軸 ( + 或 Ctrl+滾輪 )">+</button>
-        <button type="button" class="btn btn-ghost btn-sm" data-tl="fit" title="縮放到完整時長">適合</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-out" title="縮小（看見更長時間）">−</button>
+        <span class="tl-zoom-readout" data-tl="zoom-readout" title="目前縮放">—</span>
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-in" title="放大（看見更短時間，例如只顯示 10 秒）">+</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="fit" title="顯示完整時長（例如 2:50）">全長</button>
         <label class="tl-snap-label" title="拖曳時吸附到 1 毫秒 (0.001s)">
           <input type="checkbox" data-tl="snap" checked />
           <span>吸附 1ms</span>
@@ -98,6 +102,19 @@ export function createSubtitleTimeline(root, opts) {
           </select>
         </label>
       </div>
+    </div>
+    <div class="tl-viewbar" data-tl="viewbar">
+      <span class="tl-viewbar-label">顯示範圍</span>
+      <div class="tl-view-presets" role="group" aria-label="時間軸顯示範圍">
+        <button type="button" class="btn btn-ghost btn-sm tl-view-preset is-active" data-window="0" title="顯示完整影片時長">全長</button>
+        <button type="button" class="btn btn-ghost btn-sm tl-view-preset" data-window="30" title="畫面約顯示 30 秒">30秒</button>
+        <button type="button" class="btn btn-ghost btn-sm tl-view-preset" data-window="10" title="畫面約顯示 10 秒">10秒</button>
+        <button type="button" class="btn btn-ghost btn-sm tl-view-preset" data-window="5" title="畫面約顯示 5 秒">5秒</button>
+        <button type="button" class="btn btn-ghost btn-sm tl-view-preset" data-window="1" title="畫面約顯示 1 秒">1秒</button>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" data-tl="page-prev" title="上一段視窗（例如 10–20 秒 → 0–10 秒）">◀ 上一段</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-tl="page-next" title="下一段視窗（例如 0–10 秒 → 10–20 秒）">下一段 ▶</button>
+      <span class="tl-range-readout" data-tl="range-readout" title="目前畫面顯示的時間區間">顯示 — ／ 總長 —</span>
     </div>
     <div class="tl-scroll" data-tl="scroll" tabindex="0" role="region" aria-label="字幕時間軸（每句一列）">
       <div class="tl-canvas" data-tl="canvas">
@@ -300,24 +317,114 @@ export function createSubtitleTimeline(root, opts) {
     el.playhead.style.transform = `translateX(${x}px)`;
   }
 
+  function visibleTrackWidth() {
+    return Math.max(80, (el.scroll?.clientWidth || 640) - LABEL_W - 12);
+  }
+
+  /** @returns {{ start: number, end: number, span: number, total: number }} */
+  function getVisibleRange() {
+    const total = duration();
+    const w = visibleTrackWidth();
+    const start = Math.max(0, (el.scroll?.scrollLeft || 0) / Math.max(pxPerSec, 1e-6));
+    const span = w / Math.max(pxPerSec, 1e-6);
+    const end = Math.min(total, start + span);
+    return { start, end, span, total };
+  }
+
   function updateZoomReadout() {
     const elRead = root.querySelector('[data-tl="zoom-readout"]');
-    if (!elRead) return;
-    if (pxPerSec >= 1000) {
-      elRead.textContent = `${(pxPerSec / 1000).toFixed(2)} px/ms`;
-    } else if (pxPerSec < 10) {
-      elRead.textContent = `${pxPerSec.toFixed(2)} px/s`;
-    } else {
-      elRead.textContent = `${Math.round(pxPerSec)} px/s`;
+    const rangeEl = root.querySelector('[data-tl="range-readout"]');
+    const { start, end, span, total } = getVisibleRange();
+
+    if (elRead) {
+      // Prefer human window length over raw px/s
+      if (viewWindowSec === 0 && Math.abs(span - total) / Math.max(total, 0.1) < 0.08) {
+        elRead.textContent = '全長';
+      } else if (span >= 60) {
+        elRead.textContent = `視窗 ${(span / 60).toFixed(1)} 分`;
+      } else if (span >= 1) {
+        elRead.textContent = `視窗 ${span.toFixed(span < 10 ? 2 : 1)} 秒`;
+      } else {
+        elRead.textContent = `視窗 ${Math.round(span * 1000)} ms`;
+      }
     }
+
+    if (rangeEl) {
+      rangeEl.textContent = `顯示 ${formatTime(start)} – ${formatTime(end)} ／ 總長 ${formatTime(total)}`;
+    }
+
+    // Highlight matching preset if close
+    root.querySelectorAll('.tl-view-preset').forEach((btn) => {
+      const w = Number(btn.getAttribute('data-window'));
+      let on = false;
+      if (w === 0) {
+        on = viewWindowSec === 0 || Math.abs(span - total) / Math.max(total, 0.1) < 0.08;
+      } else {
+        on = Math.abs(span - w) / w < 0.12;
+      }
+      btn.classList.toggle('is-active', on);
+    });
+
     const btnIn = root.querySelector('[data-tl="zoom-in"]');
     const btnOut = root.querySelector('[data-tl="zoom-out"]');
-    // Use small epsilon relative to scale so float error never sticks a button
     if (btnIn instanceof HTMLButtonElement) {
       btnIn.disabled = pxPerSec >= ZOOM_MAX * 0.999;
     }
     if (btnOut instanceof HTMLButtonElement) {
       btnOut.disabled = pxPerSec <= ZOOM_MIN * 1.001;
+    }
+  }
+
+  /**
+   * Zoom so that roughly `windowSec` of timeline fits the track viewport.
+   * windowSec <= 0 → full duration (default for 2:50 etc).
+   * @param {number} windowSec
+   * @param {number} [windowStartSec] left edge of the window (default: keep/playhead)
+   */
+  function setViewWindow(windowSec, windowStartSec) {
+    const total = Math.max(0.5, duration());
+    const trackW = visibleTrackWidth();
+    let win = Number(windowSec);
+
+    if (!Number.isFinite(win) || win <= 0 || win >= total * 0.98) {
+      viewWindowSec = 0;
+      fit();
+      return;
+    }
+
+    win = Math.min(win, total);
+    viewWindowSec = win;
+    const pps = trackW / win;
+
+    let start = Number(windowStartSec);
+    if (!Number.isFinite(start)) {
+      // Prefer keep current left edge; else place playhead near left 15%
+      const cur = getVisibleRange().start;
+      const video = opts.getVideo?.();
+      const t = video && Number.isFinite(video.currentTime) ? video.currentTime : cur;
+      start = Math.max(0, t - win * 0.15);
+    }
+    start = Math.min(Math.max(0, start), Math.max(0, total - win));
+
+    pxPerSec = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pps));
+    render();
+    if (el.scroll) {
+      el.scroll.scrollLeft = Math.max(0, start * pxPerSec);
+    }
+    updateZoomReadout();
+  }
+
+  /** Page the visible window left/right by one window width (0–10 → 10–20). */
+  function pageViewWindow(dir) {
+    const { start, span, total } = getVisibleRange();
+    const win = viewWindowSec > 0 ? viewWindowSec : span;
+    let nextStart = start + (dir < 0 ? -win : win);
+    nextStart = Math.min(Math.max(0, nextStart), Math.max(0, total - win * 0.5));
+    if (viewWindowSec > 0) {
+      setViewWindow(viewWindowSec, nextStart);
+    } else {
+      if (el.scroll) el.scroll.scrollLeft = Math.max(0, nextStart * pxPerSec);
+      updateZoomReadout();
     }
   }
 
@@ -355,6 +462,8 @@ export function createSubtitleTimeline(root, opts) {
       }
     }
 
+    // Free zoom → leave preset mode
+    viewWindowSec = -1;
     pxPerSec = next;
     render();
 
@@ -363,11 +472,12 @@ export function createSubtitleTimeline(root, opts) {
       let targetScroll;
       if (Number.isFinite(anchorClientX) && el.scroll.getBoundingClientRect) {
         const rect = el.scroll.getBoundingClientRect();
-        const offsetInView = anchorClientX - rect.left;
-        targetScroll = LABEL_W + anchor * pxPerSec - offsetInView;
+        // Track area starts after sticky label; map clientX → time offset in view
+        const offsetInView = Math.max(0, anchorClientX - rect.left - LABEL_W);
+        targetScroll = anchor * pxPerSec - offsetInView;
       } else {
-        const viewW = el.scroll.clientWidth;
-        targetScroll = LABEL_W + anchor * pxPerSec - viewW * 0.35;
+        const viewW = visibleTrackWidth();
+        targetScroll = anchor * pxPerSec - viewW * 0.35;
       }
       el.scroll.scrollLeft = Math.max(0, targetScroll);
     }
@@ -618,22 +728,31 @@ export function createSubtitleTimeline(root, opts) {
   }
 
   function fit() {
-    const scrollW = Math.max(40, (el.scroll?.clientWidth || 640) - LABEL_W - 24);
+    viewWindowSec = 0;
+    const scrollW = visibleTrackWidth();
     const dur = Math.max(0.5, duration());
-    // Fit full duration in view; allow further zoom-out below this via − button
+    // Default: entire media (e.g. 2:50) visible at once
     const fitted = scrollW / dur;
-    setZoom(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, fitted)), 0, LABEL_W + 8);
+    // Bypass setZoom free-zoom flag: write directly
+    const prev = pxPerSec;
+    pxPerSec = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, fitted));
+    if (Math.abs(pxPerSec - prev) / Math.max(prev, 1) > 0.001 || true) {
+      render();
+    }
     if (el.scroll) el.scroll.scrollLeft = 0;
+    updateZoomReadout();
   }
 
   /** Zoom out until the whole timeline is clearly smaller than the viewport */
   function zoomOverview() {
-    const scrollW = Math.max(40, (el.scroll?.clientWidth || 640) - LABEL_W - 24);
+    viewWindowSec = -1;
+    const scrollW = visibleTrackWidth();
     const dur = Math.max(0.5, duration());
-    // ~60% of fit width → visible empty margin, confirms "zoomed out"
     const overview = (scrollW / dur) * 0.6;
-    setZoom(Math.max(ZOOM_MIN, overview), 0, LABEL_W + 8);
+    pxPerSec = Math.max(ZOOM_MIN, overview);
+    render();
     if (el.scroll) el.scroll.scrollLeft = 0;
+    updateZoomReadout();
   }
 
   function timeFromClientX(clientX, trackEl) {
@@ -667,6 +786,19 @@ export function createSubtitleTimeline(root, opts) {
   root.querySelector('[data-tl="zoom-in"]')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
+    // Prefer stepping through presets when one is active: 全長→30→10→5→1
+    const presets = [0, 30, 10, 5, 1];
+    if (viewWindowSec >= 0) {
+      const i = presets.indexOf(viewWindowSec);
+      if (i >= 0 && i < presets.length - 1) {
+        setViewWindow(presets[i + 1], getVisibleRange().start);
+        return;
+      }
+      if (viewWindowSec === 0) {
+        setViewWindow(30, 0);
+        return;
+      }
+    }
     const video = opts.getVideo?.();
     const anchor =
       video && Number.isFinite(video.currentTime) ? video.currentTime : undefined;
@@ -675,26 +807,59 @@ export function createSubtitleTimeline(root, opts) {
   root.querySelector('[data-tl="zoom-out"]')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const video = opts.getVideo?.();
-    const anchor =
-      video && Number.isFinite(video.currentTime) ? video.currentTime : undefined;
-    // If already near "fit", one more step goes to overview (clearly smaller)
-    const scrollW = Math.max(40, (el.scroll?.clientWidth || 640) - LABEL_W - 24);
-    const fitLevel = scrollW / Math.max(0.5, duration());
-    if (pxPerSec <= fitLevel * 1.15) {
-      zoomOverview();
-    } else {
-      zoomOut(anchor);
+    const presets = [0, 30, 10, 5, 1];
+    if (viewWindowSec > 0) {
+      const i = presets.indexOf(viewWindowSec);
+      if (i > 0) {
+        setViewWindow(presets[i - 1], getVisibleRange().start);
+        return;
+      }
     }
+    // From free zoom or 1s window → step toward full
+    const { span, start } = getVisibleRange();
+    const total = duration();
+    if (span < total * 0.95) {
+      // Jump to next coarser preset by span
+      if (span <= 1.5) setViewWindow(5, start);
+      else if (span <= 7) setViewWindow(10, start);
+      else if (span <= 20) setViewWindow(30, start);
+      else fit();
+      return;
+    }
+    zoomOverview();
   });
   root.querySelector('[data-tl="fit"]')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
     fit();
   });
+  root.querySelector('[data-tl="page-prev"]')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    pageViewWindow(-1);
+  });
+  root.querySelector('[data-tl="page-next"]')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    pageViewWindow(1);
+  });
+  root.querySelectorAll('.tl-view-preset').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const w = Number(btn.getAttribute('data-window'));
+      if (w === 0) fit();
+      else setViewWindow(w, getVisibleRange().start);
+    });
+  });
   root.querySelector('[data-tl="snap"]')?.addEventListener('change', (e) => {
     snapEnabled = Boolean(/** @type {HTMLInputElement} */ (e.target).checked);
   });
+
+  el.scroll?.addEventListener(
+    'scroll',
+    () => {
+      updateZoomReadout();
+    },
+    { passive: true },
+  );
   const followSelect = /** @type {HTMLSelectElement|null} */ (
     root.querySelector('[data-tl="follow-mode"]')
   );
