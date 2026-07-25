@@ -1163,6 +1163,30 @@ body {
   font-size: 0.75rem;
 }
 
+.tl-zoom-readout {
+  display: inline-flex;
+  align-items: center;
+  min-width: 4.5rem;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  padding: 0.15rem 0.35rem;
+  border-radius: var(--radius-sm);
+  background: oklch(0.18 0 0);
+  border: 1px solid var(--border);
+  user-select: none;
+}
+
+.tl-toolbar-right .btn[data-tl='zoom-in'],
+.tl-toolbar-right .btn[data-tl='zoom-out'] {
+  min-width: 2rem;
+  font-weight: 700;
+  font-size: 1rem;
+  line-height: 1;
+}
+
 .tl-scroll {
   position: relative;
   overflow: auto;
@@ -1171,7 +1195,9 @@ body {
   outline: none;
   background: oklch(0.15 0 0);
   border-bottom: 1px solid var(--border);
-  touch-action: pan-y;
+  /* Allow both axes: zoomed timeline needs horizontal pan */
+  touch-action: auto;
+  overscroll-behavior: contain;
 }
 
 .tl-scroll.is-dragging {

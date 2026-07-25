@@ -24,7 +24,12 @@
 export function createSubtitleTimeline(root, opts) {
   if (!root) throw new Error('timeline root required');
 
+  /** Pixels per second — higher = more zoomed in (ms detail) */
   let pxPerSec = 48;
+  /** Allow zooming out past "fit" so the whole show is smaller than the viewport */
+  const ZOOM_MIN = 0.35;
+  /** High zoom for ms edits; zoom-out uses large steps so you can return quickly */
+  const ZOOM_MAX = 4000;
   let selectedIdx = -1;
   let snapEnabled = true;
   /**
@@ -65,19 +70,21 @@ export function createSubtitleTimeline(root, opts) {
   let drag = null;
 
   root.classList.add('tl-editor');
+  if (!root.hasAttribute('tabindex')) root.tabIndex = 0;
   root.innerHTML = `
     <div class="tl-toolbar">
       <div class="tl-toolbar-left">
         <span class="tl-toolbar-title">字幕時間軸</span>
-        <span class="tl-toolbar-hint" data-tl="count-hint">每句一列 · 拖曳色塊移動 · 後句可自動跟隨</span>
+        <span class="tl-toolbar-hint" data-tl="count-hint">每句一列 · +/− 放大縮小 · Ctrl+滾輪縮放</span>
       </div>
       <div class="tl-toolbar-right">
         <button type="button" class="btn btn-ghost btn-sm" data-tl="undo" title="復原 (Ctrl+Z)" disabled>復原</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="redo" title="重做 (Ctrl+Y)" disabled>重做</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="restore-base" title="還原至產生預覽時的時間軸" disabled>還原產生時</button>
-        <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-out" title="縮小">−</button>
-        <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-in" title="放大">+</button>
-        <button type="button" class="btn btn-ghost btn-sm" data-tl="fit" title="符合時長">適合</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-out" title="縮小時間軸 ( − 或 Ctrl+滾輪 )">−</button>
+        <span class="tl-zoom-readout" data-tl="zoom-readout" title="目前縮放（像素/秒）">48 px/s</span>
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-in" title="放大時間軸 ( + 或 Ctrl+滾輪 )">+</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="fit" title="縮放到完整時長">適合</button>
         <label class="tl-snap-label" title="拖曳時吸附到 1 毫秒 (0.001s)">
           <input type="checkbox" data-tl="snap" checked />
           <span>吸附 1ms</span>
@@ -293,14 +300,120 @@ export function createSubtitleTimeline(root, opts) {
     el.playhead.style.transform = `translateX(${x}px)`;
   }
 
+  function updateZoomReadout() {
+    const elRead = root.querySelector('[data-tl="zoom-readout"]');
+    if (!elRead) return;
+    if (pxPerSec >= 1000) {
+      elRead.textContent = `${(pxPerSec / 1000).toFixed(2)} px/ms`;
+    } else if (pxPerSec < 10) {
+      elRead.textContent = `${pxPerSec.toFixed(2)} px/s`;
+    } else {
+      elRead.textContent = `${Math.round(pxPerSec)} px/s`;
+    }
+    const btnIn = root.querySelector('[data-tl="zoom-in"]');
+    const btnOut = root.querySelector('[data-tl="zoom-out"]');
+    // Use small epsilon relative to scale so float error never sticks a button
+    if (btnIn instanceof HTMLButtonElement) {
+      btnIn.disabled = pxPerSec >= ZOOM_MAX * 0.999;
+    }
+    if (btnOut instanceof HTMLButtonElement) {
+      btnOut.disabled = pxPerSec <= ZOOM_MIN * 1.001;
+    }
+  }
+
+  /**
+   * Set zoom level, keeping anchorSec at a stable screen position.
+   * @param {number} nextPxPerSec
+   * @param {number} [anchorSec] time under cursor / playhead
+   * @param {number} [anchorClientX] screen x of anchor (optional)
+   */
+  function setZoom(nextPxPerSec, anchorSec, anchorClientX) {
+    const prev = pxPerSec;
+    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(nextPxPerSec) || prev));
+    if (!(next > 0) || !Number.isFinite(next)) {
+      updateZoomReadout();
+      return;
+    }
+    // Relative epsilon: at high zoom, absolute 1e-6 is meaningless; at low zoom, need real change
+    if (Math.abs(next - prev) / Math.max(prev, next, 1) < 0.001) {
+      updateZoomReadout();
+      return;
+    }
+
+    // Prefer explicit anchor, else playhead, else viewport center time
+    let anchor = Number(anchorSec);
+    if (!Number.isFinite(anchor)) {
+      const video = opts.getVideo?.();
+      if (video && Number.isFinite(video.currentTime)) {
+        anchor = video.currentTime;
+      } else {
+        const scroll = el.scroll;
+        const midX =
+          (scroll?.scrollLeft || 0) +
+          Math.max(0, (scroll?.clientWidth || 0) / 2 - LABEL_W);
+        anchor = Math.max(0, midX / Math.max(prev, 1e-6));
+      }
+    }
+
+    pxPerSec = next;
+    render();
+
+    // Restore scroll so anchor stays put
+    if (el.scroll && Number.isFinite(anchor)) {
+      let targetScroll;
+      if (Number.isFinite(anchorClientX) && el.scroll.getBoundingClientRect) {
+        const rect = el.scroll.getBoundingClientRect();
+        const offsetInView = anchorClientX - rect.left;
+        targetScroll = LABEL_W + anchor * pxPerSec - offsetInView;
+      } else {
+        const viewW = el.scroll.clientWidth;
+        targetScroll = LABEL_W + anchor * pxPerSec - viewW * 0.35;
+      }
+      el.scroll.scrollLeft = Math.max(0, targetScroll);
+    }
+    updateZoomReadout();
+  }
+
+  /**
+   * Adaptive step: zoom out must drop quickly from high zoom (ms view → overview),
+   * otherwise many clicks appear to "do nothing".
+   * @param {'in' | 'out'} dir
+   */
+  function zoomStepFactor(dir) {
+    if (dir === 'in') {
+      if (pxPerSec < 20) return 1.6;
+      if (pxPerSec < 100) return 1.5;
+      if (pxPerSec < 500) return 1.45;
+      return 1.4;
+    }
+    // out
+    if (pxPerSec > 1500) return 1 / 3;
+    if (pxPerSec > 600) return 1 / 2.5;
+    if (pxPerSec > 150) return 1 / 2;
+    if (pxPerSec > 40) return 1 / 1.7;
+    return 1 / 1.5;
+  }
+
+  function zoomBy(factor, anchorSec, anchorClientX) {
+    setZoom(pxPerSec * factor, anchorSec, anchorClientX);
+  }
+
+  function zoomIn(anchorSec, anchorClientX) {
+    zoomBy(zoomStepFactor('in'), anchorSec, anchorClientX);
+  }
+
+  function zoomOut(anchorSec, anchorClientX) {
+    zoomBy(zoomStepFactor('out'), anchorSec, anchorClientX);
+  }
+
   function tickStep() {
-    // Prefer finer ticks when zoomed in so ms labels stay readable
+    // Prefer finer ticks when zoomed in — but never so fine we spawn thousands of nodes
     const target = 80 / pxPerSec;
-    const steps = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120];
+    const steps = [0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
     for (const s of steps) {
       if (s >= target) return s;
     }
-    return 120;
+    return 600;
   }
 
   function escapeHtml(str) {
@@ -318,11 +431,19 @@ export function createSubtitleTimeline(root, opts) {
 
   function renderRuler(dur) {
     const w = LABEL_W + dur * pxPerSec + 40;
-    el.canvas.style.width = `${w}px`;
-    const step = tickStep();
-    const minor = step / 2;
+    el.canvas.style.width = `${Math.max(w, el.scroll?.clientWidth || 0)}px`;
+    let step = tickStep();
+    let minor = step / 2;
+    // Hard cap tick count — dense ticks at high zoom previously froze the UI
+    // so zoom-out clicks appeared broken (page hung mid-render).
+    const MAX_TICKS = 240;
+    const est = dur / Math.max(minor, 1e-6);
+    if (est > MAX_TICKS) {
+      minor = dur / MAX_TICKS;
+      step = minor * 2;
+    }
     let html = `<div class="tl-ruler-gutter" style="width:${LABEL_W}px"></div><div class="tl-ruler-marks">`;
-    for (let t = 0; t <= dur + 0.001; t += minor) {
+    for (let t = 0; t <= dur + 1e-9; t += minor) {
       const isMajor = Math.abs(t / step - Math.round(t / step)) < 1e-6;
       const left = t * pxPerSec;
       if (isMajor) {
@@ -333,7 +454,7 @@ export function createSubtitleTimeline(root, opts) {
     }
     html += '</div>';
     el.ruler.innerHTML = html;
-    el.ruler.style.width = `${w}px`;
+    el.ruler.style.width = `${Math.max(w, el.scroll?.clientWidth || 0)}px`;
   }
 
   function renderRows() {
@@ -493,15 +614,26 @@ export function createSubtitleTimeline(root, opts) {
     updateInspector();
     const video = opts.getVideo?.();
     setPlayhead(video?.currentTime || 0);
+    updateZoomReadout();
   }
 
   function fit() {
-    const scrollW = el.scroll.clientWidth - LABEL_W - 24;
-    const dur = duration();
-    if (scrollW > 40 && dur > 0) {
-      pxPerSec = Math.min(200, Math.max(8, scrollW / dur));
-      render();
-    }
+    const scrollW = Math.max(40, (el.scroll?.clientWidth || 640) - LABEL_W - 24);
+    const dur = Math.max(0.5, duration());
+    // Fit full duration in view; allow further zoom-out below this via − button
+    const fitted = scrollW / dur;
+    setZoom(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, fitted)), 0, LABEL_W + 8);
+    if (el.scroll) el.scroll.scrollLeft = 0;
+  }
+
+  /** Zoom out until the whole timeline is clearly smaller than the viewport */
+  function zoomOverview() {
+    const scrollW = Math.max(40, (el.scroll?.clientWidth || 640) - LABEL_W - 24);
+    const dur = Math.max(0.5, duration());
+    // ~60% of fit width → visible empty margin, confirms "zoomed out"
+    const overview = (scrollW / dur) * 0.6;
+    setZoom(Math.max(ZOOM_MIN, overview), 0, LABEL_W + 8);
+    if (el.scroll) el.scroll.scrollLeft = 0;
   }
 
   function timeFromClientX(clientX, trackEl) {
@@ -532,15 +664,34 @@ export function createSubtitleTimeline(root, opts) {
   btnRedo?.addEventListener('click', () => opts.onRedo?.());
   btnRestoreBase?.addEventListener('click', () => opts.onRestoreBaseline?.());
 
-  root.querySelector('[data-tl="zoom-in"]')?.addEventListener('click', () => {
-    pxPerSec = Math.min(240, pxPerSec * 1.35);
-    render();
+  root.querySelector('[data-tl="zoom-in"]')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const video = opts.getVideo?.();
+    const anchor =
+      video && Number.isFinite(video.currentTime) ? video.currentTime : undefined;
+    zoomIn(anchor);
   });
-  root.querySelector('[data-tl="zoom-out"]')?.addEventListener('click', () => {
-    pxPerSec = Math.max(6, pxPerSec / 1.35);
-    render();
+  root.querySelector('[data-tl="zoom-out"]')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const video = opts.getVideo?.();
+    const anchor =
+      video && Number.isFinite(video.currentTime) ? video.currentTime : undefined;
+    // If already near "fit", one more step goes to overview (clearly smaller)
+    const scrollW = Math.max(40, (el.scroll?.clientWidth || 640) - LABEL_W - 24);
+    const fitLevel = scrollW / Math.max(0.5, duration());
+    if (pxPerSec <= fitLevel * 1.15) {
+      zoomOverview();
+    } else {
+      zoomOut(anchor);
+    }
   });
-  root.querySelector('[data-tl="fit"]')?.addEventListener('click', () => fit());
+  root.querySelector('[data-tl="fit"]')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fit();
+  });
   root.querySelector('[data-tl="snap"]')?.addEventListener('change', (e) => {
     snapEnabled = Boolean(/** @type {HTMLInputElement} */ (e.target).checked);
   });
@@ -572,22 +723,40 @@ export function createSubtitleTimeline(root, opts) {
     });
   }
 
+  // Zoom: Ctrl/Meta/Alt + wheel (Alt avoids browser page-zoom on some systems)
   el.scroll.addEventListener(
     'wheel',
     (e) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
+      if (!(e.ctrlKey || e.metaKey || e.altKey)) return;
       e.preventDefault();
-      const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
-      const prev = pxPerSec;
-      pxPerSec = Math.min(240, Math.max(6, pxPerSec * factor));
-      const t = timeFromClientX(e.clientX);
-      render();
-      const newX = LABEL_W + t * pxPerSec;
-      const oldX = LABEL_W + t * prev;
-      el.scroll.scrollLeft += newX - oldX;
+      e.stopPropagation();
+      const track = el.rows?.querySelector('.tl-row-track');
+      let anchorSec = 0;
+      if (track) {
+        const rect = track.getBoundingClientRect();
+        anchorSec = Math.max(0, (e.clientX - rect.left) / Math.max(pxPerSec, 1e-6));
+      } else {
+        const video = opts.getVideo?.();
+        anchorSec = video?.currentTime || 0;
+      }
+      if (e.deltaY > 0) zoomOut(anchorSec, e.clientX);
+      else zoomIn(anchorSec, e.clientX);
     },
     { passive: false },
   );
+
+  // Double-click ruler → zoom in at that time
+  el.ruler.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    const track = el.rows?.querySelector('.tl-row-track');
+    let anchorSec = 0;
+    if (track) {
+      const rect = track.getBoundingClientRect();
+      anchorSec = Math.max(0, (e.clientX - rect.left) / Math.max(pxPerSec, 1e-6));
+    }
+    zoomIn(anchorSec, e.clientX);
+    zoomIn(anchorSec, e.clientX);
+  });
 
   el.ruler.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
@@ -840,19 +1009,48 @@ export function createSubtitleTimeline(root, opts) {
     setPlayhead(t);
   });
 
-  // Global undo/redo when focus is in timeline panel
+  // Undo/redo + zoom keys when focus is in timeline panel
   root.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
-    if (!mod) return;
     const key = e.key.toLowerCase();
-    if (key === 'z' && !e.shiftKey) {
-      e.preventDefault();
-      opts.onUndo?.();
+    if (mod) {
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        opts.onUndo?.();
+        return;
+      }
+      if (key === 'y' || (key === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        opts.onRedo?.();
+        return;
+      }
+      // Ctrl+= / Ctrl+- zoom (and numpad)
+      if (key === '=' || key === '+' || e.key === 'Add') {
+        e.preventDefault();
+        zoomIn(opts.getVideo?.()?.currentTime);
+        return;
+      }
+      if (key === '-' || key === '_' || e.key === 'Subtract') {
+        e.preventDefault();
+        zoomOut(opts.getVideo?.()?.currentTime);
+        return;
+      }
+      if (key === '0') {
+        e.preventDefault();
+        fit();
+        return;
+      }
       return;
     }
-    if (key === 'y' || (key === 'z' && e.shiftKey)) {
+    // = / - without modifier when timeline focused
+    if (e.key === '=' || e.key === '+') {
       e.preventDefault();
-      opts.onRedo?.();
+      zoomIn(opts.getVideo?.()?.currentTime);
+      return;
+    }
+    if (e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      zoomOut(opts.getVideo?.()?.currentTime);
     }
   });
 
