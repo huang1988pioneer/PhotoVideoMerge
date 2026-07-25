@@ -1141,6 +1141,28 @@ body {
   user-select: none;
 }
 
+.tl-follow-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-left: 0.25rem;
+}
+
+.tl-follow-mode-label {
+  white-space: nowrap;
+}
+
+.tl-follow-select {
+  width: auto;
+  min-width: 6.5rem;
+  max-width: 8.5rem;
+  height: 1.85rem;
+  padding: 0.15rem 0.4rem;
+  font-size: 0.75rem;
+}
+
 .tl-scroll {
   position: relative;
   overflow: auto;
@@ -1149,6 +1171,17 @@ body {
   outline: none;
   background: oklch(0.15 0 0);
   border-bottom: 1px solid var(--border);
+  touch-action: pan-y;
+}
+
+.tl-scroll.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+  touch-action: none;
+}
+
+.tl-scroll.is-dragging .tl-clip {
+  cursor: grabbing;
 }
 
 .tl-scroll:focus-visible {

@@ -23,7 +23,7 @@ import {
   shiftChunks,
   shiftChunksFrom,
 } from './subtitle.js';
-import { createSubtitleTimeline } from './timeline.js';
+import { createSubtitleTimeline, rechainSubtitleChunks } from './timeline.js';
 
 /** @typedef {{
  *   id: string,
@@ -79,6 +79,16 @@ let previewPartialFrom = 0;   // 0-based chunk index where the partial shift beg
 let previewPartialDelta = 0;  // total partial delta currently baked into lastChunks
 /** Script text that produced current subtitle chunks (for reuse until manual clear) */
 let lastScriptSource = null;
+
+/** Undo/redo stack for subtitle timeline (free edits + offsets) */
+/** @type {{ timestamp: [number, number], text: string }[][]} */
+let subHistory = [];
+/** Index into subHistory; -1 = empty */
+let subHistoryIndex = -1;
+const SUB_HISTORY_MAX = 60;
+/** Snapshot at last「產生預覽」— one-click restore */
+/** @type {{ timestamp: [number, number], text: string }[] | null} */
+let subHistoryBaseline = null;
 
 const SCRIPT_STORE_KEY = 'videomerge.scriptText';
 const SCRIPT_OPT_KEY = 'videomerge.optScriptSubs';
@@ -361,7 +371,7 @@ app.innerHTML = `
                   />
                 </label>
                 <button type="button" class="btn btn-ghost btn-sm" id="btn-subs-first">套用第一句時間</button>
-                <span class="field-hint" id="subs-first-hint">例如填 6：第1句對到 6 秒，後句一併往後平移相同秒數</span>
+                <span class="field-hint" id="subs-first-hint">例如填 6：第1句對到 6 秒；後句依時間軸「後句自動」模式銜接或平移</span>
               </div>
               <div class="subs-adjust-row" id="subs-adjust-row">
                 <label class="field field-inline" for="subs-adjust-offset">
@@ -534,6 +544,9 @@ function ensureSubtitleTimeline() {
     },
     getVideo: () => els.resultVideo,
     onChange: (chunks) => commitFreeTimelineChunks(chunks),
+    onUndo: () => undoTimeline(),
+    onRedo: () => redoTimeline(),
+    onRestoreBaseline: () => restoreTimelineBaseline(),
     onSeek: (sec) => {
       if (els.resultVideo && Number.isFinite(sec)) {
         try {
@@ -550,15 +563,186 @@ function ensureSubtitleTimeline() {
       return `${m}:${s.toFixed(2).padStart(5, '0')}`;
     },
   });
+  syncTimelineUndoUI();
   return subtitleTimeline;
+}
+
+/**
+ * @param {{ timestamp: [number, number], text: string }[] | null | undefined} chunks
+ */
+function cloneChunks(chunks) {
+  if (!chunks?.length) return [];
+  return chunks.map((c) => ({
+    timestamp: [Number(c.timestamp?.[0]) || 0, Number(c.timestamp?.[1]) || 0],
+    text: String(c.text ?? ''),
+  }));
+}
+
+function canUndoTimeline() {
+  return subHistoryIndex > 0;
+}
+
+function canRedoTimeline() {
+  return subHistoryIndex >= 0 && subHistoryIndex < subHistory.length - 1;
+}
+
+function syncTimelineUndoUI() {
+  const tl = subtitleTimeline;
+  tl?.setUndoRedoState?.({
+    canUndo: canUndoTimeline(),
+    canRedo: canRedoTimeline(),
+    canRestoreBaseline: Boolean(subHistoryBaseline?.length),
+  });
+}
+
+/**
+ * Seed or reset undo stack (e.g. after generate preview / restore session).
+ * @param {{ timestamp: [number, number], text: string }[]} chunks
+ * @param {{ asBaseline?: boolean }} [opts]
+ */
+function resetSubHistory(chunks, opts = {}) {
+  const snap = cloneChunks(chunks);
+  subHistory = snap.length ? [snap] : [];
+  subHistoryIndex = snap.length ? 0 : -1;
+  if (opts.asBaseline !== false && snap.length) {
+    subHistoryBaseline = cloneChunks(snap);
+  }
+  syncTimelineUndoUI();
+}
+
+/**
+ * Push current lastChunks onto history after a successful edit.
+ * Call only after lastChunks has been updated.
+ */
+function pushSubHistoryFromCurrent() {
+  if (!lastChunks?.length) return;
+  const snap = cloneChunks(lastChunks);
+  // Drop redo branch
+  if (subHistoryIndex < subHistory.length - 1) {
+    subHistory = subHistory.slice(0, subHistoryIndex + 1);
+  }
+  // Skip if identical to current tip
+  const tip = subHistory[subHistoryIndex];
+  if (tip && chunksEqual(tip, snap)) {
+    syncTimelineUndoUI();
+    return;
+  }
+  // Ensure we have a "before" state
+  if (subHistoryIndex < 0) {
+    subHistory = [snap];
+    subHistoryIndex = 0;
+  } else {
+    subHistory.push(snap);
+    subHistoryIndex = subHistory.length - 1;
+  }
+  while (subHistory.length > SUB_HISTORY_MAX) {
+    subHistory.shift();
+    subHistoryIndex = Math.max(0, subHistoryIndex - 1);
+  }
+  syncTimelineUndoUI();
+}
+
+/**
+ * @param {{ timestamp: [number, number], text: string }[]} a
+ * @param {{ timestamp: [number, number], text: string }[]} b
+ */
+function chunksEqual(a, b) {
+  if (a === b) return true;
+  if (!a?.length || !b?.length || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].text !== b[i].text) return false;
+    if (Math.abs(a[i].timestamp[0] - b[i].timestamp[0]) > 1e-4) return false;
+    if (Math.abs(a[i].timestamp[1] - b[i].timestamp[1]) > 1e-4) return false;
+  }
+  return true;
+}
+
+/**
+ * Apply chunks without recording history (undo/redo).
+ * @param {{ timestamp: [number, number], text: string }[]} chunks
+ */
+function applyChunksNoHistory(chunks) {
+  if (!chunks?.length) return;
+  lastChunks = cloneChunks(chunks);
+  savedBaseChunks = cloneChunks(chunks);
+  previewExtraOffset = 0;
+  previewPartialFrom = 0;
+  previewPartialDelta = 0;
+  if (els.subsAdjustOffset) els.subsAdjustOffset.value = '0';
+  if (els.subsPartialFrom) els.subsPartialFrom.value = '1';
+  if (els.subsPartialOffset) els.subsPartialOffset.value = '0';
+  publishSubtitleOutputs({ fromTimeline: true, silentInvalidate: true });
+  ensureSubtitleTimeline()?.render();
+  syncTimelineUndoUI();
+}
+
+function undoTimeline() {
+  if (!canUndoTimeline()) {
+    toast('沒有可復原的步驟', 'info');
+    return;
+  }
+  subHistoryIndex -= 1;
+  applyChunksNoHistory(subHistory[subHistoryIndex]);
+  toast(`已復原時間軸（${subHistoryIndex + 1}/${subHistory.length}）`, 'success');
+}
+
+function redoTimeline() {
+  if (!canRedoTimeline()) {
+    toast('沒有可重做的步驟', 'info');
+    return;
+  }
+  subHistoryIndex += 1;
+  applyChunksNoHistory(subHistory[subHistoryIndex]);
+  toast(`已重做時間軸（${subHistoryIndex + 1}/${subHistory.length}）`, 'success');
+}
+
+/** Restore to state right after last「產生預覽」subtitle build */
+function restoreTimelineBaseline() {
+  if (!subHistoryBaseline?.length) {
+    toast('沒有產生預覽時的時間軸可還原', 'error');
+    return;
+  }
+  // Record current then jump to baseline as a new history step
+  if (lastChunks?.length && !chunksEqual(lastChunks, subHistoryBaseline)) {
+    // ensure current is on stack tip before applying baseline as new edit
+    if (subHistoryIndex < 0 || !chunksEqual(subHistory[subHistoryIndex], lastChunks)) {
+      pushSubHistoryFromCurrent();
+    }
+  }
+  lastChunks = cloneChunks(subHistoryBaseline);
+  savedBaseChunks = cloneChunks(subHistoryBaseline);
+  previewExtraOffset = 0;
+  previewPartialFrom = 0;
+  previewPartialDelta = 0;
+  if (els.subsAdjustOffset) els.subsAdjustOffset.value = '0';
+  if (els.subsPartialFrom) els.subsPartialFrom.value = '1';
+  if (els.subsPartialOffset) els.subsPartialOffset.value = '0';
+  publishSubtitleOutputs({ fromTimeline: true });
+  pushSubHistoryFromCurrent();
+  ensureSubtitleTimeline()?.render();
+  toast('已還原至產生預覽時的時間軸', 'success');
 }
 
 /**
  * Free-form NLE edit: lastChunks becomes the new base (offsets reset).
  * @param {{ timestamp: [number, number], text: string }[]} chunks
+ * @param {{ recordHistory?: boolean }} [opts]
  */
-function commitFreeTimelineChunks(chunks) {
+function commitFreeTimelineChunks(chunks, opts = {}) {
   if (!chunks?.length) return;
+  const record = opts.recordHistory !== false;
+
+  // Seed history with state before this edit
+  if (record && lastChunks?.length) {
+    if (subHistoryIndex < 0) {
+      subHistory = [cloneChunks(lastChunks)];
+      subHistoryIndex = 0;
+    } else if (!chunksEqual(subHistory[subHistoryIndex], lastChunks)) {
+      // tip out of sync — push current first
+      pushSubHistoryFromCurrent();
+    }
+  }
+
   lastChunks = chunks.map((c) => ({
     timestamp: [Number(c.timestamp[0]) || 0, Number(c.timestamp[1]) || 0],
     text: String(c.text ?? ''),
@@ -574,6 +758,8 @@ function commitFreeTimelineChunks(chunks) {
   if (els.subsPartialFrom) els.subsPartialFrom.value = '1';
   if (els.subsPartialOffset) els.subsPartialOffset.value = '0';
   publishSubtitleOutputs({ fromTimeline: true });
+  if (record) pushSubHistoryFromCurrent();
+  else syncTimelineUndoUI();
 }
 
 /**
@@ -724,6 +910,8 @@ function restoreScriptAndSubtitles() {
     if (els.subsPartialOffset) {
       els.subsPartialOffset.value = String(previewPartialDelta);
     }
+    // Restore session: seed undo at current state (baseline = restored)
+    resetSubHistory(lastChunks, { asBaseline: true });
   } catch {
     /* ignore corrupt storage */
   }
@@ -742,6 +930,9 @@ function clearScriptAndSubtitles() {
   previewPartialFrom = 0;
   previewPartialDelta = 0;
   isSubtitlePreviewMode = false;
+  subHistory = [];
+  subHistoryIndex = -1;
+  subHistoryBaseline = null;
 
   if (lastSrtUrl) {
     URL.revokeObjectURL(lastSrtUrl);
@@ -1518,6 +1709,14 @@ async function recomputePreviewChunks(overrides = {}) {
     chunks = shiftChunksFrom(chunks, partFrom, partDelta, maxEnd);
   }
 
+  // Seed undo with state before offset tweak
+  if (lastChunks?.length) {
+    if (subHistoryIndex < 0) {
+      subHistory = [cloneChunks(lastChunks)];
+      subHistoryIndex = 0;
+    }
+  }
+
   // 3. Persist new state
   lastChunks = chunks;
   previewExtraOffset = globalOff;
@@ -1525,6 +1724,7 @@ async function recomputePreviewChunks(overrides = {}) {
   previewPartialDelta = partDelta;
 
   publishSubtitleOutputs();
+  pushSubHistoryFromCurrent();
 }
 
 /**
@@ -1546,8 +1746,10 @@ async function applyPreviewOffset() {
 }
 
 /**
- * Set first cue start time and ripple-shift all later cues by the same delta.
- * Example: first was 0s → set 6s ⇒ every cue +6s.
+ * Set first cue start time; later cues follow according to timeline mode:
+ * - chain (default): 2nd after 1st ends, 3rd after 2nd, …
+ * - shift: all cues translate by the same delta
+ * - off: only first cue moves
  */
 async function applyFirstStart() {
   if (!lastChunks?.length) {
@@ -1560,6 +1762,10 @@ async function applyFirstStart() {
     return;
   }
   const currentFirst = Number(lastChunks[0].timestamp?.[0]) || 0;
+  const firstDur = Math.max(
+    0.2,
+    (Number(lastChunks[0].timestamp?.[1]) || 0) - currentFirst,
+  );
   let delta = target - currentFirst;
   if (Math.abs(delta) < 0.001) {
     toast('第一句已在該時間', 'info');
@@ -1567,35 +1773,78 @@ async function applyFirstStart() {
   }
 
   const maxDur = lastTotalDur || lastCycleDur || 0;
-  // Keep all cues in range when possible
-  for (const c of lastChunks) {
-    const s = Number(c.timestamp[0]) || 0;
-    const e = Number(c.timestamp[1]) || 0;
-    if (s + delta < 0) delta = Math.max(delta, -s);
-    if (maxDur > 0 && e + delta > maxDur) delta = Math.min(delta, maxDur - e);
-  }
-  delta = Math.round(delta * 100) / 100;
+  const mode =
+    ensureSubtitleTimeline()?.getFollowMode?.() ||
+    (() => {
+      try {
+        return localStorage.getItem('videomerge.followMode') || 'chain';
+      } catch {
+        return 'chain';
+      }
+    })();
 
-  const next = lastChunks.map((c) => ({
-    timestamp: [
-      (Number(c.timestamp[0]) || 0) + delta,
-      (Number(c.timestamp[1]) || 0) + delta,
-    ],
-    text: c.text,
-  }));
+  let next;
+  if (mode === 'shift') {
+    for (const c of lastChunks) {
+      const s = Number(c.timestamp[0]) || 0;
+      const e = Number(c.timestamp[1]) || 0;
+      if (s + delta < 0) delta = Math.max(delta, -s);
+      if (maxDur > 0 && e + delta > maxDur) delta = Math.min(delta, maxDur - e);
+    }
+    delta = Math.round(delta * 100) / 100;
+    next = lastChunks.map((c) => ({
+      timestamp: [
+        (Number(c.timestamp[0]) || 0) + delta,
+        (Number(c.timestamp[1]) || 0) + delta,
+      ],
+      text: c.text,
+    }));
+  } else {
+    // off or chain: move first cue only, then chain-pack the rest
+    let s0 = Math.max(0, target);
+    let e0 = s0 + firstDur;
+    if (maxDur > 0 && e0 > maxDur) {
+      e0 = maxDur;
+      s0 = Math.max(0, e0 - firstDur);
+    }
+    next = lastChunks.map((c, i) =>
+      i === 0
+        ? { timestamp: [s0, e0], text: c.text }
+        : {
+            timestamp: [Number(c.timestamp[0]) || 0, Number(c.timestamp[1]) || 0],
+            text: c.text,
+          },
+    );
+    if (mode === 'chain' || mode === 'off') {
+      // even for "off" when using 第一句開始, chain is usually desired for lyrics;
+      // only skip chain when mode is explicitly shift (handled above).
+      // User asked: 2 after 1, 3 after 2 — apply chain whenever not pure shift.
+      if (mode === 'chain') {
+        next = rechainSubtitleChunks(next, 0, maxDur, 0.06);
+      }
+    }
+  }
+
   commitFreeTimelineChunks(next);
   ensureSubtitleTimeline()?.render();
 
   const actual = lastChunks?.[0]?.timestamp?.[0] ?? target;
   const sign = delta >= 0 ? '+' : '';
   if (els.subsFirstHint) {
-    els.subsFirstHint.textContent = `第一句 @ ${Number(actual).toFixed(2)}s，後句已自動 ${sign}${delta.toFixed(2)}s`;
+    els.subsFirstHint.textContent =
+      mode === 'chain'
+        ? `第一句 @ ${Number(actual).toFixed(2)}s，後句已自動銜接（2接1、3接2…）`
+        : mode === 'shift'
+          ? `第一句 @ ${Number(actual).toFixed(2)}s，後句同秒平移 ${sign}${delta.toFixed(2)}s`
+          : `第一句 @ ${Number(actual).toFixed(2)}s（僅本句）`;
   }
-  if (els.subsAdjustOffset) {
-    els.subsAdjustOffset.value = '0';
-  }
+  if (els.subsAdjustOffset) els.subsAdjustOffset.value = '0';
   toast(
-    `第一句改為 ${Number(actual).toFixed(2)}s，其餘 ${lastChunks.length - 1} 句已自動平移 ${sign}${delta.toFixed(2)}s`,
+    mode === 'chain'
+      ? `第一句改為 ${Number(actual).toFixed(2)}s，後句已依序銜接`
+      : mode === 'shift'
+        ? `第一句改為 ${Number(actual).toFixed(2)}s，後句平移 ${sign}${delta.toFixed(2)}s`
+        : `第一句改為 ${Number(actual).toFixed(2)}s`,
     'success',
   );
 }
@@ -2236,6 +2485,12 @@ async function runMerge() {
         `${reused ? '沿用' : '新建'}語音稿字幕 · ${subChunkCount} 句 · 第一句@${(chunks[0]?.timestamp?.[0] ?? 0).toFixed(2)}s · 「${(chunks.map((c) => c.text).join(' ') || '').slice(0, 80)}」`,
       );
       if (!subtitleSrt.trim()) throw new Error('語音稿未能產生有效字幕');
+      // Undo stack: new generate resets baseline; reuse keeps existing history
+      if (!reused) {
+        resetSubHistory(lastChunks, { asBaseline: true });
+      } else if (subHistoryIndex < 0 && lastChunks?.length) {
+        resetSubHistory(lastChunks, { asBaseline: false });
+      }
       persistScriptAndSubtitles();
       setProgress(mergeRangeStart, '開始合併影片…');
     } else if (wantAsrSubs) {
@@ -2307,6 +2562,9 @@ async function runMerge() {
       subChunkCount = chunks.length;
       if (!subtitleSrt.trim()) {
         throw new Error('SRT 內容為空，字幕產生失敗');
+      }
+      if (lastChunks?.length) {
+        resetSubHistory(lastChunks, { asBaseline: true });
       }
       setProgress(mergeRangeStart, '開始合併影片…');
     }
@@ -2423,13 +2681,16 @@ async function runMerge() {
       // Mount NLE-style timeline after preview + soft captions ready
       const tl = ensureSubtitleTimeline();
       tl?.bindVideo();
+      syncTimelineUndoUI();
       // Fit after layout (video metadata may arrive slightly later)
       requestAnimationFrame(() => {
         tl?.fit();
         tl?.render();
+        syncTimelineUndoUI();
         setTimeout(() => {
           tl?.fit();
           tl?.render();
+          syncTimelineUndoUI();
         }, 400);
       });
     } else {
@@ -2487,6 +2748,24 @@ els.btnDismissResult.addEventListener('click', hideResultPreview);
 els.btnShowResult.addEventListener('click', showResultPreview);
 els.btnClearPreview?.addEventListener('click', () => clearPreviewManually());
 els.btnClearPreviewCollapsed?.addEventListener('click', () => clearPreviewManually());
+
+// Global Ctrl+Z / Ctrl+Y for subtitle timeline when not typing in an input
+document.addEventListener('keydown', (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (!mod) return;
+  const t = /** @type {HTMLElement} */ (e.target);
+  const tag = (t?.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || t?.isContentEditable) return;
+  if (!lastChunks?.length) return;
+  const key = e.key.toLowerCase();
+  if (key === 'z' && !e.shiftKey) {
+    e.preventDefault();
+    undoTimeline();
+  } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+    e.preventDefault();
+    redoTimeline();
+  }
+});
 els.btnExportFinal?.addEventListener('click', () => runFormalExport());
 els.btnSubsAdjust?.addEventListener('click', () => applyPreviewOffset());
 els.subsAdjustOffset?.addEventListener('keydown', (e) => {

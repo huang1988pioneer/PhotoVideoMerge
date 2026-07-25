@@ -14,6 +14,9 @@
  *   getDuration: () => number,
  *   getVideo: () => HTMLVideoElement | null,
  *   onChange: (chunks: SubChunk[]) => void,
+ *   onUndo?: () => void,
+ *   onRedo?: () => void,
+ *   onRestoreBaseline?: () => void,
  *   onSeek?: (sec: number) => void,
  *   formatTime?: (sec: number) => string,
  * }} opts
@@ -24,10 +27,23 @@ export function createSubtitleTimeline(root, opts) {
   let pxPerSec = 48;
   let selectedIdx = -1;
   let snapEnabled = true;
-  /** When moving a cue, shift this cue and all later cues by the same delta */
-  let autoFollow = true;
+  /**
+   * Auto-move mode for later cues:
+   * - off: only the edited cue moves
+   * - shift: later cues translate by the same delta
+   * - chain: later cues pack end-to-end (2nd after 1st, 3rd after 2nd, …)
+   * @type {'off' | 'shift' | 'chain'}
+   */
+  let followMode = 'chain';
+  try {
+    const saved = localStorage.getItem('videomerge.followMode');
+    if (saved === 'off' || saved === 'shift' || saved === 'chain') followMode = saved;
+  } catch {
+    /* ignore */
+  }
   const SNAP = 0.05;
   const MIN_CUE = 0.2;
+  const CHAIN_GAP = 0.06;
   /** Left label column width (px) — room for # + text */
   const LABEL_W = 200;
   const ROW_H = 36;
@@ -55,6 +71,9 @@ export function createSubtitleTimeline(root, opts) {
         <span class="tl-toolbar-hint" data-tl="count-hint">每句一列 · 拖曳色塊移動 · 後句可自動跟隨</span>
       </div>
       <div class="tl-toolbar-right">
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="undo" title="復原 (Ctrl+Z)" disabled>復原</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="redo" title="重做 (Ctrl+Y)" disabled>重做</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-tl="restore-base" title="還原至產生預覽時的時間軸" disabled>還原產生時</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-out" title="縮小">−</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-in" title="放大">+</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="fit" title="符合時長">適合</button>
@@ -62,9 +81,13 @@ export function createSubtitleTimeline(root, opts) {
           <input type="checkbox" data-tl="snap" checked />
           <span>吸附</span>
         </label>
-        <label class="tl-snap-label" title="移動某句時，該句與之後所有句子一起平移相同秒數（例：第1句 0→6 秒，後句皆 +6 秒）">
-          <input type="checkbox" data-tl="follow" checked />
-          <span>後句自動跟隨</span>
+        <label class="tl-follow-mode" title="調整某句後，後續句子如何自動移動">
+          <span class="tl-follow-mode-label">後句自動</span>
+          <select class="field-select tl-follow-select" data-tl="follow-mode" aria-label="後句自動移動方式">
+            <option value="off">關閉</option>
+            <option value="shift">同秒平移</option>
+            <option value="chain" selected>自動銜接</option>
+          </select>
         </label>
       </div>
     </div>
@@ -133,11 +156,31 @@ export function createSubtitleTimeline(root, opts) {
     return `${m}:${s.toFixed(2).padStart(5, '0')}`;
   }
 
+  function contentEndSec() {
+    const chunks = opts.getChunks() || [];
+    let end = 0;
+    for (const c of chunks) {
+      const e = Number(c.timestamp?.[1]);
+      if (Number.isFinite(e) && e > end) end = e;
+    }
+    return end;
+  }
+
+  /**
+   * Timeline length for layout / clamping.
+   * Never use a tiny fallback (e.g. 1s) when cues already extend further —
+   * that previously locked all drag moves to delta≈0.
+   */
   function duration() {
     const d = Number(opts.getDuration()) || 0;
     const video = opts.getVideo?.();
-    const vd = video && Number.isFinite(video.duration) ? video.duration : 0;
-    return Math.max(d, vd, 1);
+    const vd =
+      video && Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : 0;
+    const content = contentEndSec();
+    // room to drag past last cue; floor 30s so short clips still scrubbable
+    return Math.max(d, vd, content + 30, 30);
   }
 
   function snap(t) {
@@ -157,16 +200,15 @@ export function createSubtitleTimeline(root, opts) {
 
   /**
    * Shift cues from fromIdx (inclusive) by delta seconds (start+end).
-   * Clamps delta so no cue starts before 0 or ends past maxDur when possible.
    * @param {{ s: number, e: number, text: string }[]} origAll
    * @param {number} fromIdx
    * @param {number} delta
    * @param {number} maxDur
-   * @param {boolean} follow  if false, only fromIdx is shifted
+   * @param {boolean} followAll  if false, only fromIdx is shifted
    * @returns {{ chunks: SubChunk[], delta: number }}
    */
-  function shiftCuesFrom(origAll, fromIdx, delta, maxDur, follow) {
-    const last = follow ? origAll.length - 1 : fromIdx;
+  function shiftCuesFrom(origAll, fromIdx, delta, maxDur, followAll) {
+    const last = followAll ? origAll.length - 1 : fromIdx;
     let d = Number(delta) || 0;
     if (!Number.isFinite(d) || fromIdx < 0 || fromIdx >= origAll.length) {
       return {
@@ -175,7 +217,6 @@ export function createSubtitleTimeline(root, opts) {
       };
     }
 
-    // Bound delta so every affected cue stays in [0, maxDur]
     let minD = -Infinity;
     let maxD = Infinity;
     for (let i = fromIdx; i <= last; i++) {
@@ -186,7 +227,6 @@ export function createSubtitleTimeline(root, opts) {
       }
     }
     if (Number.isFinite(minD) && Number.isFinite(maxD) && minD > maxD) {
-      // Cannot move without clipping; prefer start >= 0
       d = minD;
     } else {
       if (Number.isFinite(minD)) d = Math.max(minD, d);
@@ -201,6 +241,46 @@ export function createSubtitleTimeline(root, opts) {
       return { timestamp: [o.s + d, o.e + d], text: o.text };
     });
     return { chunks, delta: d };
+  }
+
+  /**
+   * Pack cues so each later line starts right after the previous ends.
+   * Cue 0..anchorIdx keep times; from anchorIdx+1 onward are chained.
+   * Each cue keeps its own duration.
+   * @param {SubChunk[]} chunks
+   * @param {number} anchorIdx  last cue that was manually set
+   * @param {number} maxDur
+   * @param {number} [gapSec]
+   * @returns {SubChunk[]}
+   */
+  function rechainAfter(chunks, anchorIdx, maxDur, gapSec = CHAIN_GAP) {
+    if (!chunks?.length) return chunks;
+    const next = chunks.map((c) => ({
+      timestamp: [Number(c.timestamp[0]) || 0, Number(c.timestamp[1]) || 0],
+      text: c.text,
+    }));
+    const startAt = Math.max(0, Math.floor(anchorIdx));
+    for (let i = startAt + 1; i < next.length; i++) {
+      const prevEnd = next[i - 1].timestamp[1];
+      const dur = Math.max(
+        MIN_CUE,
+        next[i].timestamp[1] - next[i].timestamp[0],
+      );
+      let s = snap(prevEnd + gapSec);
+      let e = s + dur;
+      if (Number.isFinite(maxDur) && maxDur > 0 && e > maxDur) {
+        e = maxDur;
+        s = Math.max(0, e - dur);
+        if (s < prevEnd) {
+          // overflow: still place after previous as much as possible
+          s = Math.min(prevEnd + gapSec, Math.max(0, maxDur - MIN_CUE));
+          e = Math.min(maxDur, s + dur);
+        }
+      }
+      if (e <= s) e = s + MIN_CUE;
+      next[i] = { timestamp: [s, e], text: next[i].text };
+    }
+    return next;
   }
 
   function setPlayhead(sec) {
@@ -255,10 +335,15 @@ export function createSubtitleTimeline(root, opts) {
     const trackW = dur * pxPerSec;
 
     if (el.countHint) {
+      const modeLabel =
+        followMode === 'chain'
+          ? '自動銜接（2接1、3接2…）'
+          : followMode === 'shift'
+            ? '同秒平移'
+            : '後句不自動動';
       el.countHint.textContent = chunks.length
-        ? `共 ${chunks.length} 句 · 每句一列` +
-          (autoFollow ? ' · 後句自動跟隨已開' : ' · 後句自動跟隨已關')
-        : '每句一列 · 可開「後句自動跟隨」整段平移';
+        ? `共 ${chunks.length} 句 · 每句一列 · ${modeLabel}`
+        : `每句一列 · ${modeLabel}`;
     }
 
     el.rows.innerHTML = '';
@@ -353,18 +438,45 @@ export function createSubtitleTimeline(root, opts) {
         text: c.text,
       })),
     );
+    // Full re-render only after commit (not during drag)
     render();
   }
 
-  function select(idx) {
+  /** Update selected styles without rebuilding DOM (critical for drag). */
+  function highlightSelection(idx) {
     selectedIdx = idx;
+    el.rows?.querySelectorAll('.tl-row').forEach((row) => {
+      const i = Number(row.dataset.idx);
+      const on = i === idx;
+      row.classList.toggle('is-selected', on);
+      row.querySelector('.tl-clip')?.classList.toggle('is-selected', on);
+    });
+    el.cueList?.querySelectorAll('.tl-cue-row').forEach((row) => {
+      row.classList.toggle('is-selected', Number(row.dataset.idx) === idx);
+    });
+    updateInspector();
+  }
+
+  /**
+   * @param {number} idx
+   * @param {{ soft?: boolean, scroll?: boolean }} [opts]
+   */
+  function select(idx, opts = {}) {
+    const soft = Boolean(opts.soft);
+    const doScroll = opts.scroll !== false && !soft;
+    selectedIdx = idx;
+    if (soft) {
+      highlightSelection(idx);
+      return;
+    }
     renderRows();
     updateInspector();
-    // Scroll list row into view
-    const listRow = el.cueList?.querySelector(`.tl-cue-row[data-idx="${idx}"]`);
-    listRow?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    const tlRow = el.rows?.querySelector(`.tl-row[data-idx="${idx}"]`);
-    tlRow?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    if (doScroll) {
+      const listRow = el.cueList?.querySelector(`.tl-cue-row[data-idx="${idx}"]`);
+      listRow?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      const tlRow = el.rows?.querySelector(`.tl-row[data-idx="${idx}"]`);
+      tlRow?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
   }
 
   function render() {
@@ -404,6 +516,15 @@ export function createSubtitleTimeline(root, opts) {
   }
 
   // —— Toolbar ——
+  const btnUndo = /** @type {HTMLButtonElement|null} */ (root.querySelector('[data-tl="undo"]'));
+  const btnRedo = /** @type {HTMLButtonElement|null} */ (root.querySelector('[data-tl="redo"]'));
+  const btnRestoreBase = /** @type {HTMLButtonElement|null} */ (
+    root.querySelector('[data-tl="restore-base"]')
+  );
+  btnUndo?.addEventListener('click', () => opts.onUndo?.());
+  btnRedo?.addEventListener('click', () => opts.onRedo?.());
+  btnRestoreBase?.addEventListener('click', () => opts.onRestoreBaseline?.());
+
   root.querySelector('[data-tl="zoom-in"]')?.addEventListener('click', () => {
     pxPerSec = Math.min(240, pxPerSec * 1.35);
     render();
@@ -416,9 +537,33 @@ export function createSubtitleTimeline(root, opts) {
   root.querySelector('[data-tl="snap"]')?.addEventListener('change', (e) => {
     snapEnabled = Boolean(/** @type {HTMLInputElement} */ (e.target).checked);
   });
-  root.querySelector('[data-tl="follow"]')?.addEventListener('change', (e) => {
-    autoFollow = Boolean(/** @type {HTMLInputElement} */ (e.target).checked);
-  });
+  const followSelect = /** @type {HTMLSelectElement|null} */ (
+    root.querySelector('[data-tl="follow-mode"]')
+  );
+  if (followSelect) {
+    followSelect.value = followMode;
+    followSelect.addEventListener('change', () => {
+      const v = followSelect.value;
+      followMode = v === 'shift' || v === 'chain' || v === 'off' ? v : 'chain';
+      try {
+        localStorage.setItem('videomerge.followMode', followMode);
+      } catch {
+        /* ignore */
+      }
+      // Optionally re-pack entire list when switching to chain
+      if (followMode === 'chain') {
+        const chunks = opts.getChunks();
+        if (chunks?.length) {
+          const maxDur = duration();
+          const packed = rechainAfter(chunks, 0, maxDur, CHAIN_GAP);
+          // Keep cue 0 where it is: rechainAfter from 0 only moves 1..n
+          commitChunks(packed);
+          return;
+        }
+      }
+      render();
+    });
+  }
 
   el.scroll.addEventListener(
     'wheel',
@@ -456,7 +601,8 @@ export function createSubtitleTimeline(root, opts) {
       const idx = Number(clip.dataset.idx);
       const chunks = opts.getChunks() || [];
       if (!Number.isFinite(idx) || !chunks[idx]) return;
-      select(idx);
+      // Soft select: do NOT rebuild DOM or scroll — that aborted drag before
+      select(idx, { soft: true, scroll: false });
       const mode =
         handle?.getAttribute('data-handle') === 'start'
           ? 'start'
@@ -477,13 +623,18 @@ export function createSubtitleTimeline(root, opts) {
           text: ch.text,
         })),
       };
-      clip.setPointerCapture?.(e.pointerId);
+      try {
+        clip.setPointerCapture(e.pointerId);
+      } catch {
+        /* some browsers reject if already released */
+      }
+      el.scroll?.classList.add('is-dragging');
       return;
     }
 
     if (row && track) {
       const idx = Number(row.dataset.idx);
-      if (Number.isFinite(idx)) select(idx);
+      if (Number.isFinite(idx)) select(idx, { soft: true });
       seekFromEvent(e, track);
     }
   });
@@ -526,16 +677,30 @@ export function createSubtitleTimeline(root, opts) {
     let next;
 
     if (drag.mode === 'move') {
-      // Desired delta from original position; follow-mode shifts this cue + all later
-      let wantDelta = snap(drag.origS + dx) - drag.origS;
-      const shifted = shiftCuesFrom(
-        drag.origAll,
-        drag.idx,
-        wantDelta,
-        maxDur,
-        autoFollow,
-      );
-      next = shifted.chunks;
+      const wantDelta = snap(drag.origS + dx) - drag.origS;
+      if (followMode === 'shift') {
+        const shifted = shiftCuesFrom(
+          drag.origAll,
+          drag.idx,
+          wantDelta,
+          maxDur,
+          true,
+        );
+        next = shifted.chunks;
+      } else {
+        // off or chain: move only this cue first; chain packs others after
+        const shifted = shiftCuesFrom(
+          drag.origAll,
+          drag.idx,
+          wantDelta,
+          maxDur,
+          false,
+        );
+        next = shifted.chunks;
+        if (followMode === 'chain') {
+          next = rechainAfter(next, drag.idx, maxDur, CHAIN_GAP);
+        }
+      }
       const s = next[drag.idx].timestamp[0];
       const end = next[drag.idx].timestamp[1];
       livePaint(next);
@@ -548,7 +713,7 @@ export function createSubtitleTimeline(root, opts) {
       return;
     }
 
-    // Resize handles: only this cue (no auto-follow)
+    // Resize handles: edit this cue, then optionally rechain later lines
     next = drag.origAll.map((o) => ({
       timestamp: [o.s, o.e],
       text: o.text,
@@ -568,6 +733,9 @@ export function createSubtitleTimeline(root, opts) {
     }
     [s, end] = clampCue(s, end, maxDur);
     next[drag.idx] = { timestamp: [s, end], text: next[drag.idx].text };
+    if (followMode === 'chain') {
+      next = rechainAfter(next, drag.idx, maxDur, CHAIN_GAP);
+    }
     livePaint(next);
     if (selectedIdx === drag.idx) {
       el.selStart.value = String(round2(s));
@@ -580,23 +748,35 @@ export function createSubtitleTimeline(root, opts) {
   function livePaint(chunks) {
     chunks.forEach((c, i) => {
       const clip = el.rows.querySelector(`.tl-clip[data-idx="${i}"]`);
-      if (!clip) return;
       const s = Number(c.timestamp[0]) || 0;
       const e = Number(c.timestamp[1]) || s + MIN_CUE;
-      /** @type {HTMLElement} */ (clip).style.left = `${s * pxPerSec}px`;
-      /** @type {HTMLElement} */ (clip).style.width = `${Math.max(8, (e - s) * pxPerSec)}px`;
-      const range = clip.querySelector('.tl-clip-range');
-      if (range) range.textContent = `${formatTime(s)}–${formatTime(e)}`;
+      if (clip) {
+        /** @type {HTMLElement} */ (clip).style.left = `${s * pxPerSec}px`;
+        /** @type {HTMLElement} */ (clip).style.width =
+          `${Math.max(8, (e - s) * pxPerSec)}px`;
+        const range = clip.querySelector('.tl-clip-range');
+        if (range) range.textContent = `${formatTime(s)}–${formatTime(e)}`;
+      }
+      const listRow = el.cueList?.querySelector(`.tl-cue-row[data-idx="${i}"]`);
+      if (listRow) {
+        const times = listRow.querySelectorAll('.tl-cue-time');
+        if (times[0]) times[0].textContent = formatTime(s);
+        if (times[1]) times[1].textContent = formatTime(e);
+      }
     });
   }
 
-  window.addEventListener('pointerup', () => {
+  function endDrag(commit) {
+    el.scroll?.classList.remove('is-dragging');
     if (!drag) return;
-    if (drag._live) commitChunks(drag._live);
+    const live = drag._live;
     drag = null;
-  });
+    if (commit && live) commitChunks(live);
+  }
+
+  window.addEventListener('pointerup', () => endDrag(true));
   window.addEventListener('pointercancel', () => {
-    drag = null;
+    endDrag(false);
     render();
   });
 
@@ -614,36 +794,32 @@ export function createSubtitleTimeline(root, opts) {
     const origLen = origE - origS;
     const newLen = end - s;
     const delta = s - origS;
-    // Pure translate (duration unchanged) + auto-follow → ripple later cues
-    const isTranslate = Math.abs(newLen - origLen) < 0.02 && Math.abs(end - (origE + delta)) < 0.05;
+    const isTranslate =
+      Math.abs(newLen - origLen) < 0.02 && Math.abs(end - (origE + delta)) < 0.05;
 
-    if (autoFollow && isTranslate && Math.abs(delta) >= 0.001) {
+    let next;
+    if (followMode === 'shift' && isTranslate && Math.abs(delta) >= 0.001) {
       const origAll = chunks.map((c) => ({
         s: Number(c.timestamp[0]) || 0,
         e: Number(c.timestamp[1]) || 0,
         text: c.text,
       }));
-      const { chunks: shifted } = shiftCuesFrom(
-        origAll,
-        selectedIdx,
-        delta,
-        maxDur,
-        true,
-      );
-      // Keep edited text on selected row
-      shifted[selectedIdx] = {
-        timestamp: [...shifted[selectedIdx].timestamp],
+      const shifted = shiftCuesFrom(origAll, selectedIdx, delta, maxDur, true);
+      next = shifted.chunks;
+      next[selectedIdx] = {
+        timestamp: [...next[selectedIdx].timestamp],
         text: el.selText.value,
       };
-      commitChunks(shifted);
-      return;
+    } else {
+      next = chunks.map((c, i) =>
+        i === selectedIdx
+          ? { timestamp: [s, end], text: el.selText.value }
+          : { timestamp: [c.timestamp[0], c.timestamp[1]], text: c.text },
+      );
+      if (followMode === 'chain') {
+        next = rechainAfter(next, selectedIdx, maxDur, CHAIN_GAP);
+      }
     }
-
-    const next = chunks.map((c, i) =>
-      i === selectedIdx
-        ? { timestamp: [s, end], text: el.selText.value }
-        : { timestamp: [c.timestamp[0], c.timestamp[1]], text: c.text },
-    );
     commitChunks(next);
   });
 
@@ -657,7 +833,25 @@ export function createSubtitleTimeline(root, opts) {
     setPlayhead(t);
   });
 
+  // Global undo/redo when focus is in timeline panel
+  root.addEventListener('keydown', (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod) return;
+    const key = e.key.toLowerCase();
+    if (key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      opts.onUndo?.();
+      return;
+    }
+    if (key === 'y' || (key === 'z' && e.shiftKey)) {
+      e.preventDefault();
+      opts.onRedo?.();
+    }
+  });
+
   el.scroll.addEventListener('keydown', (e) => {
+    // Ctrl+Z / Y handled on root
+    if (e.ctrlKey || e.metaKey) return;
     const chunks = opts.getChunks();
     if (!chunks?.length || selectedIdx < 0) return;
     const step = e.shiftKey ? 0.5 : 0.05;
@@ -680,13 +874,15 @@ export function createSubtitleTimeline(root, opts) {
       e: Number(c.timestamp[1]) || 0,
       text: c.text,
     }));
-    const { chunks: next } = shiftCuesFrom(
-      origAll,
-      selectedIdx,
-      ds,
-      maxDur,
-      autoFollow,
-    );
+    let next;
+    if (followMode === 'shift') {
+      next = shiftCuesFrom(origAll, selectedIdx, ds, maxDur, true).chunks;
+    } else {
+      next = shiftCuesFrom(origAll, selectedIdx, ds, maxDur, false).chunks;
+      if (followMode === 'chain') {
+        next = rechainAfter(next, selectedIdx, maxDur, CHAIN_GAP);
+      }
+    }
     commitChunks(next);
   });
 
@@ -722,10 +918,58 @@ export function createSubtitleTimeline(root, opts) {
     select,
     bindVideo,
     getSelectedIndex: () => selectedIdx,
+    getFollowMode: () => followMode,
+    /**
+     * @param {{ canUndo?: boolean, canRedo?: boolean, canRestoreBaseline?: boolean }} state
+     */
+    setUndoRedoState(state) {
+      if (btnUndo) btnUndo.disabled = !state.canUndo;
+      if (btnRedo) btnRedo.disabled = !state.canRedo;
+      if (btnRestoreBase) btnRestoreBase.disabled = !state.canRestoreBaseline;
+    },
+    /**
+     * Re-pack all cues after index 0 (or given anchor) so each follows the previous end.
+     * @param {number} [anchorIdx]
+     */
+    rechainAll(anchorIdx = 0) {
+      const chunks = opts.getChunks();
+      if (!chunks?.length) return;
+      commitChunks(rechainAfter(chunks, anchorIdx, duration(), CHAIN_GAP));
+    },
     destroy() {
       cancelAnimationFrame(raf);
       ro.disconnect();
       root.innerHTML = '';
     },
   };
+}
+
+/**
+ * Shared helper for main.js — pack cues so line N+1 starts after line N ends.
+ * @param {{ timestamp: [number, number], text: string }[]} chunks
+ * @param {number} anchorIdx
+ * @param {number} maxDur
+ * @param {number} [gapSec]
+ */
+export function rechainSubtitleChunks(chunks, anchorIdx, maxDur, gapSec = 0.06) {
+  const MIN = 0.2;
+  if (!chunks?.length) return chunks || [];
+  const next = chunks.map((c) => ({
+    timestamp: [Number(c.timestamp[0]) || 0, Number(c.timestamp[1]) || 0],
+    text: c.text,
+  }));
+  const startAt = Math.max(0, Math.floor(anchorIdx));
+  for (let i = startAt + 1; i < next.length; i++) {
+    const prevEnd = next[i - 1].timestamp[1];
+    const dur = Math.max(MIN, next[i].timestamp[1] - next[i].timestamp[0]);
+    let s = prevEnd + gapSec;
+    let e = s + dur;
+    if (Number.isFinite(maxDur) && maxDur > 0 && e > maxDur) {
+      e = maxDur;
+      s = Math.max(0, e - dur);
+    }
+    if (e <= s) e = s + MIN;
+    next[i] = { timestamp: [s, e], text: next[i].text };
+  }
+  return next;
 }
