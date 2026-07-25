@@ -1,0 +1,62 @@
+[Script Info]
+Title: 喵布布本喵掉的毛
+ScriptType: v4.00+
+PlayResX: 1280
+PlayResY: 720
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Microsoft YaHei,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,40,40,48,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:06.00,0:00:07.68,Default,,0,0,0,,(喵) 人類聽好
+Dialogue: 0,0:00:07.74,0:00:08.85,Default,,0,0,0,,低頭跪好
+Dialogue: 0,0:00:08.91,0:00:10.02,Default,,0,0,0,,眼睛看好
+Dialogue: 0,0:00:10.08,0:00:11.20,Default,,0,0,0,,本喵出場
+Dialogue: 0,0:00:11.26,0:00:13.55,Default,,0,0,0,,這不是普通的毛
+Dialogue: 0,0:00:13.61,0:00:15.89,Default,,0,0,0,,這是本喵親自掉
+Dialogue: 0,0:00:15.95,0:00:18.57,Default,,0,0,0,,一邊躺平打個哈欠
+Dialogue: 0,0:00:18.63,0:00:21.90,Default,,0,0,0,,一邊順手送你一撮光耀
+Dialogue: 0,0:00:21.96,0:00:24.30,Default,,0,0,0,,翻個身 就灑一地
+Dialogue: 0,0:00:24.36,0:00:26.70,Default,,0,0,0,,走兩步 又多幾縷
+Dialogue: 0,0:00:26.76,0:00:30.02,Default,,0,0,0,,什麼都沒做都這麼尊貴
+Dialogue: 0,0:00:30.08,0:00:33.03,Default,,0,0,0,,你還在那邊算來算去
+Dialogue: 0,0:00:33.09,0:00:36.54,Default,,0,0,0,,喵布布本喵掉的毛 (嘿)
+Dialogue: 0,0:00:36.60,0:00:41.76,Default,,0,0,0,,尊貴到你不敢吸一口 (不敢吸一口)
+Dialogue: 0,0:00:41.82,0:00:45.26,Default,,0,0,0,,每天躺著懶腰就長成寶
+Dialogue: 0,0:00:45.32,0:00:48.12,Default,,0,0,0,,想不想要 你自己說
+Dialogue: 0,0:00:48.18,0:00:51.63,Default,,0,0,0,,喵布布本喵掉的毛 (喵)
+Dialogue: 0,0:00:51.69,0:00:55.46,Default,,0,0,0,,一根一根都帶傲嬌氣味飄
+Dialogue: 0,0:00:55.52,0:00:57.98,Default,,0,0,0,,錢放下 人可以走
+Dialogue: 0,0:00:58.04,0:01:02.16,Default,,0,0,0,,能不能買到看我心情好不好
+Dialogue: 0,0:01:02.22,0:01:04.88,Default,,0,0,0,,貼心標籤 本喵原廠
+Dialogue: 0,0:01:04.94,0:01:08.26,Default,,0,0,0,,無人敢仿 假貨滾遠一丈
+Dialogue: 0,0:01:08.32,0:01:11.56,Default,,0,0,0,,每一根都含「懶得理你」
+Dialogue: 0,0:01:11.62,0:01:16.100,Default,,0,0,0,,過敏？那是你信仰不夠虔誠一點點而已
+Dialogue: 0,0:01:17.06,0:01:19.33,Default,,0,0,0,,你在那喊價 888
+Dialogue: 0,0:01:19.39,0:01:22.33,Default,,0,0,0,,吵到本喵耳朵都要折
+Dialogue: 0,0:01:22.39,0:01:25.12,Default,,0,0,0,,本喵一甩尾巴說 88
+Dialogue: 0,0:01:25.18,0:01:28.50,Default,,0,0,0,,給你機會示好 不算太苛
+Dialogue: 0,0:01:28.56,0:01:32.35,Default,,0,0,0,,喵布布本喵掉的毛 (喵喵)
+Dialogue: 0,0:01:32.41,0:01:37.58,Default,,0,0,0,,尊貴到你不敢吸一口 (深呼吸都抖)
+Dialogue: 0,0:01:37.64,0:01:41.07,Default,,0,0,0,,每天躺著懶腰就長成寶
+Dialogue: 0,0:01:41.13,0:01:43.93,Default,,0,0,0,,想不想要 你自己說
+Dialogue: 0,0:01:43.99,0:01:47.44,Default,,0,0,0,,喵布布本喵掉的毛 (嘿)
+Dialogue: 0,0:01:47.50,0:01:51.28,Default,,0,0,0,,一根一根都帶傲嬌氣味飄
+Dialogue: 0,0:01:51.34,0:01:53.79,Default,,0,0,0,,錢放下 人可以走
+Dialogue: 0,0:01:53.85,0:01:57.97,Default,,0,0,0,,能不能買到看我心情好不好
+Dialogue: 0,0:01:58.03,0:02:00.96,Default,,0,0,0,,今天想掉 就掉一床
+Dialogue: 0,0:02:01.02,0:02:05.03,Default,,0,0,0,,明天不爽 全部收回去珍藏
+Dialogue: 0,0:02:05.09,0:02:10.18,Default,,0,0,0,,後天開心 可能當著你面吞回肚裡
+Dialogue: 0,0:02:10.24,0:02:16.02,Default,,0,0,0,,你只剩滑手機看本喵的相片而已 (喵)
+Dialogue: 0,0:02:16.08,0:02:18.69,Default,,0,0,0,,喵布布本喵掉的毛
+Dialogue: 0,0:02:18.75,0:02:22.35,Default,,0,0,0,,你買到是本喵賞臉的號召
+Dialogue: 0,0:02:22.41,0:02:26.71,Default,,0,0,0,,這不是交易 是你向上朝聖一秒
+Dialogue: 0,0:02:26.77,0:02:28.78,Default,,0,0,0,,頭低一點 別吵
+Dialogue: 0,0:02:28.84,0:02:32.27,Default,,0,0,0,,喵布布本喵掉的毛 (喵~)
+Dialogue: 0,0:02:32.33,0:02:35.93,Default,,0,0,0,,最後通牒就說到這麼高傲
+Dialogue: 0,0:02:35.99,0:02:38.33,Default,,0,0,0,,錢放下 人可以走
+Dialogue: 0,0:02:38.39,0:02:42.00,Default,,0,0,0,,排隊朝拜本喵就好 (喵喵)
