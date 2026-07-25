@@ -1365,8 +1365,10 @@ body {
 
 .tl-clip-range {
   font-family: var(--mono);
-  font-size: 0.62rem;
+  font-size: 0.65rem;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
   color: oklch(0.98 0 0 / 0.92);
   white-space: nowrap;
   overflow: hidden;
@@ -1429,7 +1431,7 @@ body {
 
 .tl-cue-list-head {
   display: grid;
-  grid-template-columns: 3rem 5.5rem 5.5rem minmax(0, 1fr);
+  grid-template-columns: 3rem 7.25rem 7.25rem minmax(0, 1fr);
   gap: 0.5rem;
   padding: 0.4rem 0.65rem;
   font-size: 0.7rem;
@@ -1447,7 +1449,7 @@ body {
 
 .tl-cue-row {
   display: grid;
-  grid-template-columns: 3rem 5.5rem 5.5rem minmax(0, 1fr);
+  grid-template-columns: 3rem 7.25rem 7.25rem minmax(0, 1fr);
   gap: 0.5rem;
   align-items: center;
   padding: 0.4rem 0.65rem;
@@ -1480,8 +1482,11 @@ body {
 
 .tl-cue-time {
   font-family: var(--mono);
-  font-size: 0.75rem;
-  color: var(--faint);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  color: oklch(0.82 0.04 75);
+  white-space: nowrap;
 }
 
 .tl-cue-text {
@@ -1692,11 +1697,52 @@ body {
   margin: 0;
 }
 
+.result-video-shell {
+  position: relative;
+  width: 100%;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
 .result-video {
   width: 100%;
   max-height: 320px;
-  border-radius: var(--radius-sm);
+  border-radius: 0;
   background: var(--bg);
+  display: block;
+  vertical-align: middle;
+}
+
+.result-timecode {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  padding: 0.4rem 0.65rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  background: oklch(0.14 0 0);
+  border-top: 1px solid var(--border);
+  user-select: text;
+}
+
+.result-timecode-cur {
+  color: oklch(0.85 0.08 75);
+  font-weight: 600;
+}
+
+.result-timecode-sep {
+  color: var(--faint);
+}
+
+.result-timecode-dur {
+  color: var(--muted);
+}
   border: 1px solid var(--border);
 }
 

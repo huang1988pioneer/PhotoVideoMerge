@@ -347,9 +347,16 @@ app.innerHTML = `
           <p class="field-hint" id="result-phase-hint">
             這是<strong>預覽</strong>（會保留到你重新「產生預覽」或按「清除預覽」）。可播放、對字幕後再正式輸出。
           </p>
-          <video class="result-video" id="result-video" controls playsinline crossorigin="anonymous">
-            <track id="result-track" kind="subtitles" srclang="zh" label="預覽字幕" default hidden />
-          </video>
+          <div class="result-video-shell">
+            <video class="result-video" id="result-video" controls playsinline crossorigin="anonymous">
+              <track id="result-track" kind="subtitles" srclang="zh" label="預覽字幕" default hidden />
+            </video>
+            <div class="result-timecode" id="result-timecode" aria-live="off" title="目前時間 / 總長（毫秒）">
+              <span class="result-timecode-cur" id="result-timecode-cur">0:00.000</span>
+              <span class="result-timecode-sep">/</span>
+              <span class="result-timecode-dur" id="result-timecode-dur">0:00.000</span>
+            </div>
+          </div>
           <p class="field-hint" id="subs-result-hint" hidden></p>
           <div class="subs-preview" id="subs-preview" hidden>
             <div class="subs-preview-head">字幕軸手動調整（剪輯軟體風格時間軸 · 即時套到上方預覽）</div>
@@ -364,14 +371,14 @@ app.innerHTML = `
                     id="subs-first-start"
                     class="field-select"
                     value="0"
-                    step="0.1"
+                    step="0.001"
                     min="0"
                     max="999"
                     inputmode="decimal"
                   />
                 </label>
                 <button type="button" class="btn btn-ghost btn-sm" id="btn-subs-first">套用第一句時間</button>
-                <span class="field-hint" id="subs-first-hint">例如填 6：第1句對到 6 秒；後句依時間軸「後句自動」模式銜接或平移</span>
+                <span class="field-hint" id="subs-first-hint">例如填 6.350（支援毫秒）；後句依「後句自動」銜接或平移</span>
               </div>
               <div class="subs-adjust-row" id="subs-adjust-row">
                 <label class="field field-inline" for="subs-adjust-offset">
@@ -381,14 +388,14 @@ app.innerHTML = `
                     id="subs-adjust-offset"
                     class="field-select"
                     value="0"
-                    step="0.1"
+                    step="0.001"
                     min="-999"
                     max="999"
                     inputmode="decimal"
                   />
                 </label>
                 <button type="button" class="btn btn-ghost btn-sm" id="btn-subs-adjust">套用全體偏移</button>
-                <span class="field-hint subs-adjust-hint" id="subs-adjust-hint">正數＝字幕延後；負數＝字幕提前</span>
+                <span class="field-hint subs-adjust-hint" id="subs-adjust-hint">正數＝字幕延後；負數＝字幕提前（可至毫秒）</span>
               </div>
               <div class="subs-adjust-row" id="subs-partial-row">
                 <span class="field-label" style="white-space:nowrap">從第</span>
@@ -408,10 +415,10 @@ app.innerHTML = `
                   id="subs-partial-offset"
                   class="field-select"
                   value="0"
-                  step="0.1"
+                  step="0.001"
                   min="-999"
                   max="999"
-                  style="width:5rem"
+                  style="width:5.5rem"
                   inputmode="decimal"
                 />
                 <span class="field-label">秒</span>
@@ -511,6 +518,9 @@ const els = {
   resultBody: document.getElementById('result-body'),
   resultCollapsed: document.getElementById('result-collapsed'),
   resultVideo: document.getElementById('result-video'),
+  resultTimecode: document.getElementById('result-timecode'),
+  resultTimecodeCur: document.getElementById('result-timecode-cur'),
+  resultTimecodeDur: document.getElementById('result-timecode-dur'),
   resultTitle: document.getElementById('result-title'),
   resultPhaseHint: document.getElementById('result-phase-hint'),
   workflowSteps: document.getElementById('workflow-steps'),
@@ -556,15 +566,69 @@ function ensureSubtitleTimeline() {
         }
       }
     },
-    formatTime: (sec) => {
-      if (!Number.isFinite(sec) || sec < 0) sec = 0;
-      const m = Math.floor(sec / 60);
-      const s = sec - m * 60;
-      return `${m}:${s.toFixed(2).padStart(5, '0')}`;
-    },
+    formatTime: (sec) => formatTimecodeMs(sec),
   });
   syncTimelineUndoUI();
   return subtitleTimeline;
+}
+
+/**
+ * Display time with millisecond precision: m:ss.mmm or h:mm:ss.mmm
+ * @param {number} sec
+ * @returns {string}
+ */
+function formatTimecodeMs(sec) {
+  if (!Number.isFinite(sec) || sec < 0) sec = 0;
+  const totalMs = Math.round(sec * 1000);
+  const ms = totalMs % 1000;
+  const totalSec = Math.floor(totalMs / 1000);
+  const s = totalSec % 60;
+  const totalMin = Math.floor(totalSec / 60);
+  const m = totalMin % 60;
+  const h = Math.floor(totalMin / 60);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const pad3 = (n) => String(n).padStart(3, '0');
+  if (h > 0) {
+    return `${h}:${pad2(m)}:${pad2(s)}.${pad3(ms)}`;
+  }
+  return `${m}:${pad2(s)}.${pad3(ms)}`;
+}
+
+/** Keep preview player clock at millisecond resolution. */
+function bindResultTimecode() {
+  const video = els.resultVideo;
+  if (!video || video._tcBound) return;
+  video._tcBound = true;
+
+  const tick = () => {
+    if (els.resultTimecodeCur) {
+      els.resultTimecodeCur.textContent = formatTimecodeMs(video.currentTime || 0);
+    }
+    if (els.resultTimecodeDur) {
+      const d = Number.isFinite(video.duration) ? video.duration : 0;
+      els.resultTimecodeDur.textContent = formatTimecodeMs(d);
+    }
+  };
+
+  video.addEventListener('timeupdate', tick);
+  video.addEventListener('seeked', tick);
+  video.addEventListener('loadedmetadata', tick);
+  video.addEventListener('durationchange', tick);
+  video.addEventListener('play', () => {
+    // denser updates while playing (timeupdate is ~4Hz; rAF for smoother ms feel)
+    const loop = () => {
+      if (video.paused || video.ended) return;
+      tick();
+      video._tcRaf = requestAnimationFrame(loop);
+    };
+    cancelAnimationFrame(video._tcRaf || 0);
+    video._tcRaf = requestAnimationFrame(loop);
+  });
+  video.addEventListener('pause', () => {
+    cancelAnimationFrame(video._tcRaf || 0);
+    tick();
+  });
+  tick();
 }
 
 /**
@@ -810,7 +874,7 @@ function publishSubtitleOutputs(opts = {}) {
 
   if (els.subsFirstStart && lastChunks[0] && document.activeElement !== els.subsFirstStart) {
     els.subsFirstStart.value = String(
-      Math.round(Number(lastChunks[0].timestamp[0]) * 100) / 100,
+      Math.round(Number(lastChunks[0].timestamp[0]) * 1000) / 1000,
     );
   }
 
@@ -1430,7 +1494,7 @@ function syncResultPhaseUI() {
   if (els.subsFirstStart && lastChunks?.[0]) {
     const t0 = Number(lastChunks[0].timestamp?.[0]);
     if (Number.isFinite(t0) && document.activeElement !== els.subsFirstStart) {
-      els.subsFirstStart.value = String(Math.round(t0 * 100) / 100);
+      els.subsFirstStart.value = String(Math.round(t0 * 1000) / 1000);
     }
   }
 
@@ -1484,6 +1548,7 @@ function showResultPreview() {
 function enableSubtitleTrack() {
   const video = els.resultVideo;
   if (!video) return;
+  bindResultTimecode();
   const apply = () => {
     try {
       const tracks = video.textTracks;
@@ -1631,6 +1696,7 @@ async function restorePreviewFromStore() {
     isSubtitlePreviewMode = hasSubs || Boolean(lastChunks?.length);
 
     els.resultVideo.src = resultUrl;
+    bindResultTimecode();
     if (els.btnDownloadPreview) {
       els.btnDownloadPreview.href = resultUrl;
       els.btnDownloadPreview.download = stored.filename || 'preview.mp4';
@@ -2612,6 +2678,7 @@ async function runMerge() {
       finalUrl = null;
     }
     els.resultVideo.src = resultUrl;
+    bindResultTimecode();
     persistPreviewBlob(blob, Boolean(wantSubs && subtitleSrt?.trim()));
 
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');

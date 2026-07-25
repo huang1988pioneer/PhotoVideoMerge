@@ -41,7 +41,8 @@ export function createSubtitleTimeline(root, opts) {
   } catch {
     /* ignore */
   }
-  const SNAP = 0.05;
+  /** Snap grid in seconds (1 ms) for millisecond-accurate edits */
+  const SNAP = 0.001;
   const MIN_CUE = 0.2;
   const CHAIN_GAP = 0.06;
   /** Left label column width (px) — room for # + text */
@@ -77,9 +78,9 @@ export function createSubtitleTimeline(root, opts) {
         <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-out" title="縮小">−</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="zoom-in" title="放大">+</button>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="fit" title="符合時長">適合</button>
-        <label class="tl-snap-label" title="拖曳時吸附 0.05s">
+        <label class="tl-snap-label" title="拖曳時吸附到 1 毫秒 (0.001s)">
           <input type="checkbox" data-tl="snap" checked />
-          <span>吸附</span>
+          <span>吸附 1ms</span>
         </label>
         <label class="tl-follow-mode" title="調整某句後，後續句子如何自動移動">
           <span class="tl-follow-mode-label">後句自動</span>
@@ -104,8 +105,8 @@ export function createSubtitleTimeline(root, opts) {
     <div class="tl-cue-list-wrap">
       <div class="tl-cue-list-head">
         <span>句序</span>
-        <span>開始</span>
-        <span>結束</span>
+        <span>開始 (ms)</span>
+        <span>結束 (ms)</span>
         <span>字幕文字（一列一句）</span>
       </div>
       <div class="tl-cue-list" data-tl="cue-list" role="list"></div>
@@ -114,12 +115,12 @@ export function createSubtitleTimeline(root, opts) {
       <div class="tl-inspector-row">
         <span class="tl-inspector-badge" data-tl="sel-idx">—</span>
         <label class="field field-inline">
-          <span class="field-label">開始</span>
-          <input type="number" class="field-select" data-tl="sel-start" step="0.05" min="0" />
+          <span class="field-label">開始（秒.毫秒）</span>
+          <input type="number" class="field-select" data-tl="sel-start" step="0.001" min="0" />
         </label>
         <label class="field field-inline">
-          <span class="field-label">結束</span>
-          <input type="number" class="field-select" data-tl="sel-end" step="0.05" min="0" />
+          <span class="field-label">結束（秒.毫秒）</span>
+          <input type="number" class="field-select" data-tl="sel-end" step="0.001" min="0" />
         </label>
         <span class="tl-inspector-dur" data-tl="sel-dur"></span>
         <button type="button" class="btn btn-ghost btn-sm" data-tl="sel-apply">套用</button>
@@ -150,10 +151,14 @@ export function createSubtitleTimeline(root, opts) {
 
   function formatTime(sec) {
     if (opts.formatTime) return opts.formatTime(sec);
+    // Fallback: m:ss.mmm
     if (!Number.isFinite(sec) || sec < 0) sec = 0;
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m}:${s.toFixed(2).padStart(5, '0')}`;
+    const totalMs = Math.round(sec * 1000);
+    const ms = totalMs % 1000;
+    const totalSec = Math.floor(totalMs / 1000);
+    const s = totalSec % 60;
+    const m = Math.floor(totalSec / 60);
+    return `${m}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
   }
 
   function contentEndSec() {
@@ -289,8 +294,9 @@ export function createSubtitleTimeline(root, opts) {
   }
 
   function tickStep() {
+    // Prefer finer ticks when zoomed in so ms labels stay readable
     const target = 80 / pxPerSec;
-    const steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120];
+    const steps = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120];
     for (const s of steps) {
       if (s >= target) return s;
     }
@@ -305,8 +311,9 @@ export function createSubtitleTimeline(root, opts) {
       .replace(/"/g, '&quot;');
   }
 
-  function round2(n) {
-    return Math.round(n * 100) / 100;
+  /** Round to whole milliseconds */
+  function roundMs(n) {
+    return Math.round(Number(n) * 1000) / 1000;
   }
 
   function renderRuler(dur) {
@@ -425,10 +432,10 @@ export function createSubtitleTimeline(root, opts) {
     const e = Number(c.timestamp[1]) || 0;
     el.inspector.hidden = false;
     el.selIdx.textContent = `#${selectedIdx + 1}`;
-    if (document.activeElement !== el.selStart) el.selStart.value = String(round2(s));
-    if (document.activeElement !== el.selEnd) el.selEnd.value = String(round2(e));
+    if (document.activeElement !== el.selStart) el.selStart.value = String(roundMs(s));
+    if (document.activeElement !== el.selEnd) el.selEnd.value = String(roundMs(e));
     if (document.activeElement !== el.selText) el.selText.value = c.text || '';
-    el.selDur.textContent = `長度 ${(e - s).toFixed(2)}s`;
+    el.selDur.textContent = `長度 ${formatTime(e - s)} (${Math.round((e - s) * 1000)} ms)`;
   }
 
   function commitChunks(next) {
@@ -705,9 +712,9 @@ export function createSubtitleTimeline(root, opts) {
       const end = next[drag.idx].timestamp[1];
       livePaint(next);
       if (selectedIdx === drag.idx) {
-        el.selStart.value = String(round2(s));
-        el.selEnd.value = String(round2(end));
-        el.selDur.textContent = `長度 ${(end - s).toFixed(2)}s`;
+        el.selStart.value = String(roundMs(s));
+        el.selEnd.value = String(roundMs(end));
+        el.selDur.textContent = `長度 ${formatTime(end - s)} (${Math.round((end - s) * 1000)} ms)`;
       }
       drag._live = next;
       return;
@@ -738,9 +745,9 @@ export function createSubtitleTimeline(root, opts) {
     }
     livePaint(next);
     if (selectedIdx === drag.idx) {
-      el.selStart.value = String(round2(s));
-      el.selEnd.value = String(round2(end));
-      el.selDur.textContent = `長度 ${(end - s).toFixed(2)}s`;
+      el.selStart.value = String(roundMs(s));
+      el.selEnd.value = String(roundMs(end));
+      el.selDur.textContent = `長度 ${formatTime(end - s)} (${Math.round((end - s) * 1000)} ms)`;
     }
     drag._live = next;
   });
@@ -854,7 +861,8 @@ export function createSubtitleTimeline(root, opts) {
     if (e.ctrlKey || e.metaKey) return;
     const chunks = opts.getChunks();
     if (!chunks?.length || selectedIdx < 0) return;
-    const step = e.shiftKey ? 0.5 : 0.05;
+    // Arrow: 1ms ; Shift+Arrow: 10ms
+    const step = e.shiftKey ? 0.01 : 0.001;
     let ds = 0;
     if (e.key === 'ArrowLeft') ds = -step;
     else if (e.key === 'ArrowRight') ds = step;
