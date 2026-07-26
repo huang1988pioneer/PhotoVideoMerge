@@ -249,8 +249,11 @@ async function execOrThrow(ff, args, onLog, prog = {}) {
 export const DEFAULT_STILL_SEC = 5;
 
 /**
- * Output canvas from source orientation (image or first video).
- * Portrait → 720×1280, landscape → 1280×720, square → 720×720.
+ * Output canvas from source aspect ratio (image or first video).
+ * Keeps original proportions at 1080p class:
+ * - short edge targets 1080
+ * - long edge capped at 1920
+ * Examples: 16:9 → 1920×1080, 9:16 → 1080×1920, 3:4 → 1080×1440, 4:3 → 1440×1080.
  * @param {number} [srcW]
  * @param {number} [srcH]
  * @returns {{ width: number, height: number, orientation: 'portrait' | 'landscape' | 'square' }}
@@ -258,13 +261,44 @@ export const DEFAULT_STILL_SEC = 5;
 export function resolveOutputSize(srcW, srcH) {
   const w = Number(srcW) || 0;
   const h = Number(srcH) || 0;
-  if (h > w && w > 0) {
-    return { width: 720, height: 1280, orientation: 'portrait' };
+  if (!(w > 0 && h > 0)) {
+    return { width: 1920, height: 1080, orientation: 'landscape' };
   }
-  if (w > 0 && h > 0 && w === h) {
-    return { width: 720, height: 720, orientation: 'square' };
+
+  const SHORT = 1080;
+  const LONG_MAX = 1920;
+  const aspect = w / h;
+
+  let outW;
+  let outH;
+  if (w === h) {
+    outW = SHORT;
+    outH = SHORT;
+  } else if (w > h) {
+    // landscape: short = height
+    outH = SHORT;
+    outW = outH * aspect;
+    if (outW > LONG_MAX) {
+      outW = LONG_MAX;
+      outH = outW / aspect;
+    }
+  } else {
+    // portrait: short = width
+    outW = SHORT;
+    outH = outW / aspect;
+    if (outH > LONG_MAX) {
+      outH = LONG_MAX;
+      outW = outH * aspect;
+    }
   }
-  return { width: 1280, height: 720, orientation: 'landscape' };
+
+  // yuv420 / libx264 need even dimensions
+  outW = Math.max(2, Math.round(outW) & ~1);
+  outH = Math.max(2, Math.round(outH) & ~1);
+
+  const orientation =
+    outH > outW ? 'portrait' : outW > outH ? 'landscape' : 'square';
+  return { width: outW, height: outH, orientation };
 }
 
 /**
@@ -299,13 +333,13 @@ async function normalizeClip(ff, input, output, opts = {}) {
     onLog,
     expectedSec,
     onLocal,
-    width = 1280,
-    height = 720,
+    width = 1920,
+    height = 1080,
     isImage = false,
     durationSec,
   } = opts;
-  const W = Math.max(2, Math.round(Number(width) || 1280) & ~1);
-  const H = Math.max(2, Math.round(Number(height) || 720) & ~1);
+  const W = Math.max(2, Math.round(Number(width) || 1920) & ~1);
+  const H = Math.max(2, Math.round(Number(height) || 1080) & ~1);
   const prog = { expectedSec, onLocal };
   const vf = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,format=yuv420p`;
 
@@ -937,7 +971,7 @@ export async function mergeVideos(files, hooks = {}) {
         `輸出畫幅：${size.orientation === 'portrait' ? '直式' : size.orientation === 'square' ? '方形' : '橫式'} ${outW}×${outH}（依素材）`,
       );
     } else {
-      const size = resolveOutputSize(1280, 720);
+      const size = resolveOutputSize(1920, 1080);
       outW = size.width;
       outH = size.height;
     }

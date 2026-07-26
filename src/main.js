@@ -133,7 +133,7 @@ app.innerHTML = `
     <section class="panel" aria-labelledby="upload-title">
       <div class="panel-head">
         <h2 id="upload-title">加入影片 / 圖片</h2>
-        <p class="hint">支援影片（MP4、WebM、MOV…）與圖片（JPG、PNG、WebP…）；圖片+MP3 可直接成片，直式／橫式依圖片</p>
+        <p class="hint">支援影片（MP4、WebM、MOV…）與圖片（JPG、PNG、WebP…）；圖片+MP3 可直接成片，畫幅依原圖長寬比</p>
       </div>
 
       <label class="dropzone" id="dropzone" for="file-input">
@@ -152,7 +152,7 @@ app.innerHTML = `
             </svg>
           </div>
           <strong>拖曳影片或圖片到這裡，或點擊選擇</strong>
-          <span>圖片 + 下方 MP3 音軌 → 靜態影片；直式／橫式依圖片長寬。清單會保留到按「清除全部」</span>
+          <span>圖片 + 下方 MP3 音軌 → 靜態影片；輸出比例依原圖（1080p 級）。清單會保留到按「清除全部」</span>
         </div>
       </label>
 
@@ -327,7 +327,10 @@ app.innerHTML = `
       <div class="progress-block" id="progress-block" aria-live="polite">
         <div class="progress-label">
           <strong id="progress-status">準備中…</strong>
-          <span id="progress-pct">0%</span>
+          <div class="progress-meta">
+            <span id="progress-elapsed" class="progress-elapsed" title="已經過時間">經過 0:00</span>
+            <span id="progress-pct">0%</span>
+          </div>
         </div>
         <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-bar">
           <div class="progress-fill" id="progress-fill"></div>
@@ -526,6 +529,7 @@ const els = {
   progressBlock: document.getElementById('progress-block'),
   progressStatus: document.getElementById('progress-status'),
   progressPct: document.getElementById('progress-pct'),
+  progressElapsed: document.getElementById('progress-elapsed'),
   progressBar: document.getElementById('progress-bar'),
   progressFill: document.getElementById('progress-fill'),
   logBox: document.getElementById('log-box'),
@@ -2066,6 +2070,7 @@ async function runFormalExport() {
   els.progressBlock.classList.add('is-visible');
   els.logBox.hidden = false;
   resetProgressFloor();
+  startProgressTimer();
   setProgress(0, '正式輸出：嵌入調整後字幕…');
   appendLog('正式輸出開始（僅嵌入目前字幕軸，不重跑合併）');
 
@@ -2096,7 +2101,15 @@ async function runFormalExport() {
       els.btnDownload.hidden = false;
     }
 
-    setProgress(1, subtitlesEmbedded ? '正式輸出完成（字幕已嵌入）' : '輸出完成（字幕嵌入可能失敗，請另存 SRT）');
+    stopProgressTimer();
+    const elapsed = getElapsedLabel();
+    setProgress(
+      1,
+      subtitlesEmbedded
+        ? `正式輸出完成（字幕已嵌入）· 經過 ${elapsed}`
+        : `輸出完成（字幕嵌入可能失敗，請另存 SRT）· 經過 ${elapsed}`,
+    );
+    appendLog(`正式輸出耗時 ${elapsed}`);
     if (els.exportStatusHint) {
       els.exportStatusHint.hidden = false;
       els.exportStatusHint.textContent = subtitlesEmbedded
@@ -2124,10 +2137,12 @@ async function runFormalExport() {
     els.btnDownload?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
     console.error(err);
-    setProgress(0, '正式輸出失敗');
+    stopProgressTimer();
+    setProgress(0, `正式輸出失敗 · 經過 ${getElapsedLabel()}`);
     appendLog(err?.message || String(err));
     toast(err?.message || '正式輸出失敗', 'error');
   } finally {
+    stopProgressTimer();
     exporting = false;
     updateToolbar();
     syncResultPhaseUI();
@@ -2175,9 +2190,80 @@ function estimateOutputDurationSec() {
 
 /** Monotonic progress so bar never jumps backward mid-job */
 let progressFloor = 0;
+/** Elapsed timer for merge / image→video jobs */
+let progressTimerStart = 0;
+/** Frozen ms when timer stopped; null while running */
+let progressTimerFrozenMs = /** @type {number | null} */ (null);
+/** @type {ReturnType<typeof setInterval> | null} */
+let progressTimerId = null;
 
 function resetProgressFloor() {
   progressFloor = 0;
+}
+
+/**
+ * Format elapsed ms as m:ss or h:mm:ss
+ * @param {number} ms
+ */
+function formatElapsedMs(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const s = totalSec % 60;
+  const totalMin = Math.floor(totalSec / 60);
+  const m = totalMin % 60;
+  const h = Math.floor(totalMin / 60);
+  const pad = (n) => String(n).padStart(2, '0');
+  if (h > 0) return `${h}:${pad(m)}:${pad(s)}`;
+  return `${m}:${pad(s)}`;
+}
+
+function currentElapsedMs() {
+  if (progressTimerFrozenMs != null) return progressTimerFrozenMs;
+  if (progressTimerStart > 0) return Date.now() - progressTimerStart;
+  return 0;
+}
+
+function updateElapsedLabel() {
+  if (!els.progressElapsed) return;
+  els.progressElapsed.textContent = `經過 ${formatElapsedMs(currentElapsedMs())}`;
+}
+
+/** Start counting elapsed time (resets to 0:00). */
+function startProgressTimer() {
+  if (progressTimerId != null) {
+    clearInterval(progressTimerId);
+    progressTimerId = null;
+  }
+  progressTimerFrozenMs = null;
+  progressTimerStart = Date.now();
+  updateElapsedLabel();
+  progressTimerId = setInterval(updateElapsedLabel, 250);
+}
+
+/**
+ * Stop ticking; freeze final elapsed on screen.
+ * @param {{ reset?: boolean }} [opts]
+ */
+function stopProgressTimer(opts = {}) {
+  const { reset = false } = opts;
+  if (progressTimerId != null) {
+    clearInterval(progressTimerId);
+    progressTimerId = null;
+  }
+  if (reset) {
+    progressTimerStart = 0;
+    progressTimerFrozenMs = null;
+    if (els.progressElapsed) els.progressElapsed.textContent = '經過 0:00';
+    return;
+  }
+  if (progressTimerStart > 0 && progressTimerFrozenMs == null) {
+    progressTimerFrozenMs = Date.now() - progressTimerStart;
+  }
+  updateElapsedLabel();
+}
+
+/** @returns {string} e.g. "2:15" without prefix */
+function getElapsedLabel() {
+  return formatElapsedMs(currentElapsedMs());
 }
 
 function setProgress(ratio, status) {
@@ -2574,7 +2660,9 @@ async function runMerge() {
   els.logBox.hidden = false;
   els.logBox.textContent = '';
   resetProgressFloor();
-  setProgress(0, '載入 FFmpeg…');
+  startProgressTimer();
+  const imageJob = ready.every((c) => isImageClip(c));
+  setProgress(0, imageJob ? '圖片轉影片：載入 FFmpeg…' : '載入 FFmpeg…');
 
   try {
     // Re-check files still readable before heavy work
@@ -2887,7 +2975,17 @@ async function runMerge() {
       },
     );
 
-    setProgress(1, wantSubs ? '預覽就緒' : '完成');
+    stopProgressTimer();
+    const elapsed = getElapsedLabel();
+    setProgress(
+      1,
+      wantSubs
+        ? `預覽就緒 · 經過 ${elapsed}`
+        : imageJob
+          ? `圖片轉影片完成 · 經過 ${elapsed}`
+          : `完成 · 經過 ${elapsed}`,
+    );
+    appendLog(`總耗時 ${elapsed}${imageJob ? '（圖片轉影片）' : ''}`);
     previewBlob = blob;
     resultUrl = URL.createObjectURL(blob);
     hasFinalExport = false;
@@ -2999,19 +3097,26 @@ async function runMerge() {
     if (els.btnClearPreview) els.btnClearPreview.hidden = false;
     if (els.btnClearPreviewCollapsed) els.btnClearPreviewCollapsed.hidden = false;
     syncResultPhaseUI();
+    const doneElapsed = getElapsedLabel();
     toast(
       wantSubs
-        ? '預覽已就緒（會保留到重新產生或清除預覽）'
-        : '合併完成，可預覽或下載（會保留到清除預覽）',
+        ? `預覽已就緒 · 經過 ${doneElapsed}`
+        : imageJob
+          ? `圖片轉影片完成 · 經過 ${doneElapsed}`
+          : `合併完成 · 經過 ${doneElapsed}`,
       'success',
     );
     els.resultBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
     console.error(err);
-    setProgress(0, '失敗');
+    stopProgressTimer();
+    const elapsed = getElapsedLabel();
+    setProgress(0, `失敗 · 經過 ${elapsed}`);
     appendLog(err?.message || String(err));
+    appendLog(`失敗前耗時 ${elapsed}`);
     toast(err?.message || '合併失敗，請查看日誌', 'error');
   } finally {
+    stopProgressTimer();
     merging = false;
     updateToolbar();
     renderClips();
