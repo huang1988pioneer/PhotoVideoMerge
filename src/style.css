@@ -1829,8 +1829,6 @@ body {
 .result-timecode-dur {
   color: var(--muted);
 }
-  border: 1px solid var(--border);
-}
 
 .result-actions {
   display: flex;
