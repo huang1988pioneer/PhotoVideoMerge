@@ -150,21 +150,36 @@ export async function loadClips() {
   return rows
     .filter((r) => r?.blob instanceof Blob && r.blob.size > 0)
     .map((r) => {
-      const file = new File([r.blob], r.name || 'video.mp4', {
-        type: r.type || r.blob.type || 'video/mp4',
+      const name = r.name || 'video.mp4';
+      const mime = r.type || r.blob.type || '';
+      const isImage =
+        mime.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp)$/i.test(name);
+      const file = new File([r.blob], name, {
+        type: mime || (isImage ? 'image/jpeg' : 'video/mp4'),
         lastModified: r.lastModified || Date.now(),
       });
-      const hasFrames = Boolean(r.firstFrame && r.lastFrame);
+      // Images may only store one thumbnail in older data
+      const hasFrames = Boolean(
+        r.firstFrame && (r.lastFrame || isImage),
+      );
+      const w = Number.isFinite(r.width) ? r.width : null;
+      const h = Number.isFinite(r.height) ? r.height : null;
+      let orientation = null;
+      if (w && h) {
+        orientation = h > w ? 'portrait' : w > h ? 'landscape' : 'square';
+      }
       return {
         id: r.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         file,
         name: r.name || file.name,
         size: r.size || file.size,
         firstFrame: r.firstFrame ?? null,
-        lastFrame: r.lastFrame ?? null,
+        lastFrame: r.lastFrame ?? r.firstFrame ?? null,
         duration: Number.isFinite(r.duration) ? r.duration : null,
-        width: Number.isFinite(r.width) ? r.width : null,
-        height: Number.isFinite(r.height) ? r.height : null,
+        width: w,
+        height: h,
+        kind: isImage ? 'image' : 'video',
+        orientation,
         status: /** @type {'ready' | 'error' | 'loading'} */ (
           r.status === 'error'
             ? 'error'

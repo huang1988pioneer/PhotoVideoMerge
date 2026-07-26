@@ -768,6 +768,20 @@ body {
   max-width: 100%;
 }
 
+.clip-kind-tag {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  color: var(--accent);
+  background: oklch(0.72 0.1 220 / 0.12);
+  border: 1px solid oklch(0.72 0.1 220 / 0.28);
+  border-radius: var(--radius-pill);
+}
+
 .clip-stats {
   display: flex;
   flex-wrap: wrap;
@@ -786,6 +800,10 @@ body {
   grid-template-columns: 1fr auto 1fr;
   gap: var(--space-3);
   align-items: stretch;
+}
+
+.frames-row.is-still {
+  grid-template-columns: minmax(0, 220px);
 }
 
 .frame-cell {
@@ -809,6 +827,11 @@ body {
   overflow: hidden;
   background: var(--bg);
   border: 1px solid var(--border);
+}
+
+.frame-thumb.is-portrait {
+  aspect-ratio: 9 / 16;
+  max-width: 140px;
 }
 
 .frame-thumb img {

@@ -122,6 +122,106 @@ export async function extractFrames(file) {
   }
 }
 
+/**
+ * Whether a File looks like a still image (not video).
+ * @param {File | Blob | null | undefined} file
+ * @param {string} [name]
+ */
+export function isImageFile(file, name = '') {
+  if (!file) return false;
+  const n = name || (file instanceof File ? file.name : '') || '';
+  if (typeof file.type === 'string' && file.type.startsWith('image/')) return true;
+  return /\.(jpe?g|png|gif|webp|bmp)$/i.test(n);
+}
+
+/**
+ * Load still image metadata + JPEG data URL for clip thumbnails.
+ * @param {File} file
+ * @returns {Promise<{
+ *   firstFrame: string,
+ *   lastFrame: string,
+ *   duration: number,
+ *   width: number,
+ *   height: number,
+ *   kind: 'image',
+ *   orientation: 'portrait' | 'landscape' | 'square',
+ * }>}
+ */
+export function extractImageInfo(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.decoding = 'async';
+
+    const fail = (msg) => {
+      URL.revokeObjectURL(url);
+      reject(new Error(msg || `無法讀取圖片：${file.name}`));
+    };
+
+    img.onload = () => {
+      try {
+        const width = img.naturalWidth || img.width || 0;
+        const height = img.naturalHeight || img.height || 0;
+        if (!width || !height) {
+          fail('圖片尺寸無效');
+          return;
+        }
+
+        // Cap thumbnail decode size for memory
+        const maxEdge = 1280;
+        let tw = width;
+        let th = height;
+        if (Math.max(tw, th) > maxEdge) {
+          const scale = maxEdge / Math.max(tw, th);
+          tw = Math.max(1, Math.round(tw * scale));
+          th = Math.max(1, Math.round(th * scale));
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = tw;
+        canvas.height = th;
+        const ctx = canvas.getContext('2d', { alpha: false });
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, tw, th);
+        ctx.drawImage(img, 0, 0, tw, th);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+        URL.revokeObjectURL(url);
+
+        const orientation =
+          height > width ? 'portrait' : width > height ? 'landscape' : 'square';
+
+        resolve({
+          firstFrame: dataUrl,
+          lastFrame: dataUrl,
+          duration: 0, // still — real length set at merge (often = MP3)
+          width,
+          height,
+          kind: 'image',
+          orientation,
+        });
+      } catch (err) {
+        fail(err?.message || '圖片處理失敗');
+      }
+    };
+
+    img.onerror = () => fail(`無法讀取圖片：${file.name}`);
+    img.src = url;
+  });
+}
+
+/**
+ * @param {number} width
+ * @param {number} height
+ * @returns {'portrait' | 'landscape' | 'square'}
+ */
+export function orientationFromSize(width, height) {
+  const w = Number(width) || 0;
+  const h = Number(height) || 0;
+  if (h > w) return 'portrait';
+  if (w > h) return 'landscape';
+  return 'square';
+}
+
 export function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return '—';
   const s = Math.floor(seconds % 60);

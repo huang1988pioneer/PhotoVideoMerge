@@ -1,6 +1,19 @@
 import './style.css';
-import { extractFrames, formatBytes, formatDuration } from './frames.js';
-import { LOOP_LIMITS, mergeVideos, embedSubtitlesIntoVideo } from './merge.js';
+import {
+  extractFrames,
+  extractImageInfo,
+  formatBytes,
+  formatDuration,
+  isImageFile,
+  orientationFromSize,
+} from './frames.js';
+import {
+  LOOP_LIMITS,
+  DEFAULT_STILL_SEC,
+  mergeVideos,
+  embedSubtitlesIntoVideo,
+  resolveOutputSize,
+} from './merge.js';
 import {
   saveClips,
   loadClips,
@@ -35,6 +48,8 @@ import { createSubtitleTimeline, rechainSubtitleChunks } from './timeline.js';
  *   duration: number | null,
  *   width: number | null,
  *   height: number | null,
+ *   kind?: 'video' | 'image',
+ *   orientation?: 'portrait' | 'landscape' | 'square' | null,
  *   status: 'loading' | 'ready' | 'error',
  *   error: string | null,
  * }} Clip */
@@ -108,7 +123,7 @@ app.innerHTML = `
       </div>
       <div class="brand-text">
         <h1>VideoMerge</h1>
-        <p>首尾幀預覽 · 多段合併</p>
+        <p>影片合併 · 圖片+MP3 成片</p>
       </div>
     </div>
     <div class="header-meta" id="header-meta">本機處理 · 不上傳伺服器</div>
@@ -117,17 +132,17 @@ app.innerHTML = `
   <main class="main">
     <section class="panel" aria-labelledby="upload-title">
       <div class="panel-head">
-        <h2 id="upload-title">加入影片</h2>
-        <p class="hint">支援 MP4、WebM、MOV 等瀏覽器可播放格式</p>
+        <h2 id="upload-title">加入影片 / 圖片</h2>
+        <p class="hint">支援影片（MP4、WebM、MOV…）與圖片（JPG、PNG、WebP…）；圖片+MP3 可直接成片，直式／橫式依圖片</p>
       </div>
 
       <label class="dropzone" id="dropzone" for="file-input">
         <input
           id="file-input"
           type="file"
-          accept="video/*"
+          accept="video/*,image/jpeg,image/png,image/webp,image/gif,image/bmp,image/*"
           multiple
-          aria-label="選擇影片檔案"
+          aria-label="選擇影片或圖片檔案"
         />
         <div class="dropzone-inner">
           <div class="dropzone-icon" aria-hidden="true">
@@ -136,13 +151,13 @@ app.innerHTML = `
               <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
             </svg>
           </div>
-          <strong>拖曳影片到這裡，或點擊選擇</strong>
-          <span>可一次加入多個檔案；清單會保留到按「清除全部」為止（重新整理也不會消失）</span>
+          <strong>拖曳影片或圖片到這裡，或點擊選擇</strong>
+          <span>圖片 + 下方 MP3 音軌 → 靜態影片；直式／橫式依圖片長寬。清單會保留到按「清除全部」</span>
         </div>
       </label>
 
       <div class="toolbar">
-        <button type="button" class="btn btn-ghost" id="btn-add-more">再加入影片</button>
+        <button type="button" class="btn btn-ghost" id="btn-add-more">再加入</button>
         <button type="button" class="btn btn-danger" id="btn-clear" disabled>清除全部</button>
         <label class="opt-check" for="opt-no-audio" title="合併時移除所有音軌">
           <input type="checkbox" id="opt-no-audio" />
@@ -211,7 +226,7 @@ app.innerHTML = `
       <div class="audio-panel" aria-labelledby="audio-title">
         <div class="extend-head">
           <h3 id="audio-title">自訂音軌</h3>
-          <p class="hint" id="audio-hint">可選 MP3 當作影片聲音（取代原音；會保留到按「清除」或「清除全部」）</p>
+          <p class="hint" id="audio-hint">可選 MP3 當聲音（影片取代原音；純圖片則以 MP3 長度成片；會保留到按「清除」）</p>
         </div>
         <div class="audio-row">
           <input
@@ -239,7 +254,7 @@ app.innerHTML = `
           </label>
         </div>
         <p class="field-hint">
-          勾選「不要聲音」時會忽略此音軌。音訊比影片短會循環，比影片長則裁到影片長度。
+          勾選「不要聲音」時會忽略此音軌。影片模式：音訊短則循環、長則裁切。圖片模式：靜態畫面長度預設對齊 MP3。
           「依音軌自動辨識」需下載 Whisper 模型，較慢；有現成講稿時建議用下方語音稿。
         </p>
       </div>
@@ -291,11 +306,11 @@ app.innerHTML = `
     <section class="panel" aria-labelledby="clips-title">
       <div class="panel-head">
         <h2 id="clips-title">片段與首尾幀</h2>
-        <p class="hint" id="clips-count">尚未加入影片</p>
+        <p class="hint" id="clips-count">尚未加入素材</p>
       </div>
       <div id="clips-root">
         <div class="empty-state">
-          <p>加入影片後，這裡會顯示每段的<strong>首幀</strong>與<strong>尾幀</strong>預覽。</p>
+          <p>加入<strong>影片</strong>或<strong>圖片</strong>後，這裡會顯示首尾幀／靜態預覽。圖片可搭配 MP3 輸出直式或橫式影片。</p>
         </div>
       </div>
 
@@ -1167,10 +1182,93 @@ function clearLoopOptions() {
   if (els.loopSecs) els.loopSecs.value = String(LOOP_DEFAULTS.secs);
 }
 
+function isImageClip(clip) {
+  if (!clip) return false;
+  if (clip.kind === 'image') return true;
+  return isImageFile(clip.file, clip.name);
+}
+
+/**
+ * Base sequence length (videos use real duration; stills use estimated still length).
+ * Pure-image + MP3 + once → sum stills = audio length (resolved async in merge).
+ */
 function baseSequenceDuration() {
-  return clips
-    .filter((c) => c.status === 'ready')
-    .reduce((sum, c) => sum + (c.duration || 0), 0);
+  const ready = clips.filter((c) => c.status === 'ready');
+  if (!ready.length) return 0;
+
+  let sum = 0;
+  let imageCount = 0;
+  for (const c of ready) {
+    if (isImageClip(c)) {
+      imageCount += 1;
+      // Prefer stored duration if already set; else count placeholder later
+      if (Number.isFinite(c.duration) && c.duration > 0) sum += c.duration;
+    } else {
+      sum += Number.isFinite(c.duration) && c.duration > 0 ? c.duration : 0;
+    }
+  }
+
+  // All stills with no baked duration: use default per image for UI estimate
+  if (imageCount === ready.length && sum <= 0) {
+    return imageCount * DEFAULT_STILL_SEC;
+  }
+  // Mixed: add default for stills that have 0 duration
+  if (imageCount > 0) {
+    for (const c of ready) {
+      if (isImageClip(c) && !(Number.isFinite(c.duration) && c.duration > 0)) {
+        sum += DEFAULT_STILL_SEC;
+      }
+    }
+  }
+  return sum;
+}
+
+/**
+ * Resolve per-clip encode duration (images often match MP3 length).
+ * @param {Clip[]} ready
+ * @param {File | null} bgm
+ * @param {{ mode: string, count?: number, targetSeconds?: number }} loop
+ * @returns {Promise<{ durations: number[], audioDur: number, outputSize: { width: number, height: number, orientation: string } }>}
+ */
+async function resolveMergeClipPlan(ready, bgm, loop) {
+  let audioDur = 0;
+  if (bgm) {
+    try {
+      audioDur = await getMediaDuration(bgm);
+    } catch {
+      audioDur = 0;
+    }
+  }
+
+  const allImages = ready.every((c) => isImageClip(c));
+  const imageCount = ready.filter((c) => isImageClip(c)).length;
+
+  /** @type {number[]} */
+  const durations = ready.map((c) => {
+    if (!isImageClip(c)) {
+      return Number.isFinite(c.duration) && c.duration > 0 ? c.duration : 10;
+    }
+
+    // All-image: bake final length for once / duration; count keeps one cycle then loops
+    if (allImages && loop.mode === 'duration' && Number(loop.targetSeconds) > 0) {
+      return Math.max(0.1, Number(loop.targetSeconds) / ready.length);
+    }
+    if (allImages && audioDur > 0.2 && loop.mode === 'once') {
+      return Math.max(0.1, audioDur / Math.max(1, imageCount));
+    }
+    if (allImages && audioDur > 0.2 && loop.mode === 'count') {
+      // One full soundtrack cycle as base; stream_loop multiplies
+      return Math.max(0.1, audioDur / Math.max(1, imageCount));
+    }
+    if (Number.isFinite(c.duration) && c.duration > 0) return c.duration;
+    return DEFAULT_STILL_SEC;
+  });
+
+  // Output canvas from first ready clip with dimensions (images/videos)
+  const seed = ready.find((c) => Number(c.width) > 0 && Number(c.height) > 0);
+  const outputSize = resolveOutputSize(seed?.width, seed?.height);
+
+  return { durations, audioDur, outputSize };
 }
 
 /** @returns {{ mode: 'once' | 'count' | 'duration', count?: number, targetSeconds?: number, baseDurationSec?: number }} */
@@ -1306,6 +1404,7 @@ function setAudioFile(file, opts = {}) {
       clearStoredAudio().catch(() => {});
     }
     syncAudioUI();
+    if (clips.some((c) => isImageClip(c))) renderClips();
     return;
   }
   const okType =
@@ -1324,6 +1423,8 @@ function setAudioFile(file, opts = {}) {
     saveAudio(file).catch((err) => console.warn('無法保存音軌', err));
   }
   syncAudioUI();
+  // Image cards show「依音軌」when BGM is set
+  if (clips.some((c) => isImageClip(c))) renderClips();
   if (!silent) toast(`已選擇音軌：${file.name}（將保留到手動清除）`, 'success');
 }
 
@@ -1332,6 +1433,7 @@ function clearAudioFile(silent = false) {
   if (els.audioInput) els.audioInput.value = '';
   clearStoredAudio().catch(() => {});
   syncAudioUI();
+  if (clips.some((c) => isImageClip(c))) renderClips();
   if (!silent) toast('已手動清除自訂音軌', 'success');
 }
 
@@ -2034,15 +2136,39 @@ async function runFormalExport() {
 
 /**
  * Estimate final video duration from loop options + ready clips.
+ * Pure image + MP3 (once): prefer audio length when clips have no real duration.
  */
 function estimateOutputDurationSec() {
-  const base = baseSequenceDuration();
+  const ready = clips.filter((c) => c.status === 'ready');
   const loop = getLoopOptions();
-  if (loop.mode === 'count') {
-    return base * Math.max(1, loop.count || 1);
-  }
   if (loop.mode === 'duration') {
     return Math.max(0, loop.targetSeconds || 0);
+  }
+
+  let base = baseSequenceDuration();
+
+  // Image-only once: if stills have 0 duration, UI falls back to DEFAULT;
+  // runtime merge uses MP3 — expose that intent when audio is set.
+  const allImages = ready.length > 0 && ready.every((c) => isImageClip(c));
+  if (
+    allImages &&
+    loop.mode === 'once' &&
+    audioFile &&
+    !els.optNoAudio?.checked
+  ) {
+    // baseSequenceDuration may be N * DEFAULT_STILL; merge will use audio
+    // Keep estimate honest only when we already know audio via lastCycleDur
+    // or when every image already has duration 0 → signal audio-driven
+    const hasBaked = ready.some(
+      (c) => Number.isFinite(c.duration) && c.duration > 0,
+    );
+    if (!hasBaked && lastCycleDur > 0.2) {
+      base = lastCycleDur;
+    }
+  }
+
+  if (loop.mode === 'count') {
+    return base * Math.max(1, loop.count || 1);
   }
   return base;
 }
@@ -2108,9 +2234,17 @@ function updateToolbar() {
   }
   if (els.mergeActionHint) {
     if (ready.length === 0) {
-      els.mergeActionHint.textContent = '請先加入至少一段影片，並完成上方延長／音軌／字幕設定';
+      els.mergeActionHint.textContent =
+        '請先加入影片或圖片，並完成上方延長／音軌／字幕設定（圖片建議搭配 MP3）';
     } else if (clips.some((c) => c.status === 'loading')) {
-      els.mergeActionHint.textContent = '影片影格載入中，請稍候…';
+      els.mergeActionHint.textContent = '素材載入中，請稍候…';
+    } else if (
+      ready.every((c) => isImageClip(c)) &&
+      !audioFile &&
+      !els.optNoAudio?.checked
+    ) {
+      els.mergeActionHint.textContent =
+        '已加入圖片：建議選擇 MP3 音軌（長度會對齊音軌；也可無聲／目標時長輸出）';
     } else if (wantsSubtitleWorkflow()) {
       els.mergeActionHint.textContent =
         '將產生可調字幕的預覽（尚未正式輸出）；調好時間軸後再按「正式輸出影片」';
@@ -2131,10 +2265,15 @@ function updateToolbar() {
   syncAudioUI();
 
   if (!hasClips) {
-    els.clipsCount.textContent = '尚未加入影片';
+    els.clipsCount.textContent = '尚未加入素材';
   } else {
-    const totalDur = ready.reduce((sum, c) => sum + (c.duration || 0), 0);
-    els.clipsCount.textContent = `${clips.length} 段 · 約 ${formatDuration(totalDur)} · 就緒 ${ready.length}`;
+    const imgN = ready.filter((c) => isImageClip(c)).length;
+    const vidN = ready.length - imgN;
+    const totalDur = baseSequenceDuration();
+    const parts = [`${clips.length} 段`, `約 ${formatDuration(totalDur)}`, `就緒 ${ready.length}`];
+    if (imgN) parts.push(`圖 ${imgN}`);
+    if (vidN) parts.push(`影 ${vidN}`);
+    els.clipsCount.textContent = parts.join(' · ');
   }
 
   els.headerMeta.textContent = hasClips
@@ -2148,7 +2287,7 @@ function renderClips() {
   if (clips.length === 0) {
     els.clipsRoot.innerHTML = `
       <div class="empty-state">
-        <p>加入影片後，這裡會顯示每段的<strong>首幀</strong>與<strong>尾幀</strong>預覽。</p>
+        <p>加入<strong>影片</strong>或<strong>圖片</strong>後，這裡會顯示首尾幀／靜態預覽。</p>
       </div>
     `;
     updateToolbar();
@@ -2157,27 +2296,43 @@ function renderClips() {
 
   const list = document.createElement('ul');
   list.className = 'clip-list';
-  list.setAttribute('aria-label', '影片片段列表');
+  list.setAttribute('aria-label', '素材片段列表');
 
   clips.forEach((clip, index) => {
     const li = document.createElement('li');
     li.className = 'clip-card';
     li.dataset.id = clip.id;
+    const image = isImageClip(clip);
+    const ori =
+      clip.orientation ||
+      (clip.width && clip.height
+        ? orientationFromSize(clip.width, clip.height)
+        : null);
+    const oriLabel =
+      ori === 'portrait' ? '直式' : ori === 'landscape' ? '橫式' : ori === 'square' ? '方形' : null;
 
     const statusHtml =
       clip.status === 'loading'
-        ? `<span class="clip-status">正在擷取首尾幀…</span>`
+        ? `<span class="clip-status">${image ? '正在讀取圖片…' : '正在擷取首尾幀…'}</span>`
         : clip.status === 'error'
           ? `<span class="clip-status is-error">${escapeHtml(clip.error || '讀取失敗')}</span>`
-          : `<span class="clip-status is-ok">首尾幀就緒</span>`;
+          : `<span class="clip-status is-ok">${image ? '圖片就緒' : '首尾幀就緒'}${oriLabel ? ` · ${oriLabel}` : ''}</span>`;
 
     const firstInner = clip.firstFrame
-      ? `<img src="${clip.firstFrame}" alt="${escapeHtml(clip.name)} 首幀" />`
-      : `<div class="placeholder">${clip.status === 'loading' ? '擷取中…' : '—'}</div>`;
+      ? `<img src="${clip.firstFrame}" alt="${escapeHtml(clip.name)} ${image ? '預覽' : '首幀'}" />`
+      : `<div class="placeholder">${clip.status === 'loading' ? '載入中…' : '—'}</div>`;
 
     const lastInner = clip.lastFrame
-      ? `<img src="${clip.lastFrame}" alt="${escapeHtml(clip.name)} 尾幀" />`
-      : `<div class="placeholder">${clip.status === 'loading' ? '擷取中…' : '—'}</div>`;
+      ? `<img src="${clip.lastFrame}" alt="${escapeHtml(clip.name)} ${image ? '預覽' : '尾幀'}" />`
+      : `<div class="placeholder">${clip.status === 'loading' ? '載入中…' : '—'}</div>`;
+
+    const durLabel = image
+      ? Number.isFinite(clip.duration) && clip.duration > 0
+        ? formatDuration(clip.duration)
+        : audioFile && !els.optNoAudio?.checked
+          ? '依音軌'
+          : `靜態 ${DEFAULT_STILL_SEC}s`
+      : formatDuration(clip.duration);
 
     li.innerHTML = `
       <div class="clip-order">
@@ -2196,26 +2351,30 @@ function renderClips() {
       </div>
       <div class="clip-body">
         <div class="clip-meta">
-          <p class="clip-name" title="${escapeHtml(clip.name)}">${escapeHtml(clip.name)}</p>
+          <p class="clip-name" title="${escapeHtml(clip.name)}">${escapeHtml(clip.name)}${image ? ' <span class="clip-kind-tag">圖片</span>' : ''}</p>
           <div class="clip-stats">
-            <span>${formatDuration(clip.duration)}</span>
+            <span>${durLabel}</span>
             <span>${formatBytes(clip.size)}</span>
-            <span>${clip.width && clip.height ? `${clip.width}×${clip.height}` : '—'}</span>
+            <span>${clip.width && clip.height ? `${clip.width}×${clip.height}` : '—'}${oriLabel ? ` · ${oriLabel}` : ''}</span>
           </div>
         </div>
-        <div class="frames-row">
+        <div class="frames-row${image ? ' is-still' : ''}">
           <div class="frame-cell">
-            <span class="frame-label">首幀</span>
-            <div class="frame-thumb">${firstInner}</div>
+            <span class="frame-label">${image ? '預覽' : '首幀'}</span>
+            <div class="frame-thumb${ori === 'portrait' ? ' is-portrait' : ''}">${firstInner}</div>
           </div>
-          <div class="frame-connector" aria-hidden="true">
+          ${
+            image
+              ? ''
+              : `<div class="frame-connector" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h14M14 7l5 5-5 5"/></svg>
             <span>→</span>
           </div>
           <div class="frame-cell">
             <span class="frame-label">尾幀</span>
             <div class="frame-thumb">${lastInner}</div>
-          </div>
+          </div>`
+          }
         </div>
         ${statusHtml}
       </div>
@@ -2259,7 +2418,10 @@ async function persistClipsNow() {
 
 async function processClip(clip) {
   try {
-    const info = await extractFrames(clip.file);
+    const image = isImageClip(clip);
+    const info = image
+      ? await extractImageInfo(clip.file)
+      : await extractFrames(clip.file);
     const current = clips.find((c) => c.id === clip.id);
     if (!current) return;
     Object.assign(current, {
@@ -2268,6 +2430,10 @@ async function processClip(clip) {
       duration: info.duration,
       width: info.width,
       height: info.height,
+      kind: image ? 'image' : 'video',
+      orientation:
+        info.orientation ||
+        orientationFromSize(info.width, info.height),
       status: 'ready',
       error: null,
     });
@@ -2282,31 +2448,50 @@ async function processClip(clip) {
 }
 
 function addFiles(fileList) {
-  const files = [...fileList].filter((f) => f.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(f.name));
+  const files = [...fileList].filter(
+    (f) =>
+      f.type.startsWith('video/') ||
+      f.type.startsWith('image/') ||
+      /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(f.name) ||
+      /\.(jpe?g|png|gif|webp|bmp)$/i.test(f.name),
+  );
   if (files.length === 0) {
-    toast('請選擇有效的影片檔案', 'error');
+    toast('請選擇有效的影片或圖片檔案', 'error');
     return;
   }
 
   // Keep existing preview until user regenerates or clears it
-  const newClips = files.map((file) => ({
-    id: uid(),
-    file,
-    name: file.name,
-    size: file.size,
-    firstFrame: null,
-    lastFrame: null,
-    duration: null,
-    width: null,
-    height: null,
-    status: /** @type {const} */ ('loading'),
-    error: null,
-  }));
+  const newClips = files.map((file) => {
+    const image = isImageFile(file);
+    return {
+      id: uid(),
+      file,
+      name: file.name,
+      size: file.size,
+      firstFrame: null,
+      lastFrame: null,
+      duration: null,
+      width: null,
+      height: null,
+      kind: /** @type {'video' | 'image'} */ (image ? 'image' : 'video'),
+      orientation: null,
+      status: /** @type {const} */ ('loading'),
+      error: null,
+    };
+  });
 
   clips = [...clips, ...newClips];
   renderClips();
   schedulePersistClips();
-  toast(`已加入 ${newClips.length} 段影片（將保留到按「清除全部」）`, 'success');
+  const imgN = newClips.filter((c) => c.kind === 'image').length;
+  const vidN = newClips.length - imgN;
+  const label =
+    imgN && vidN
+      ? `${vidN} 段影片 + ${imgN} 張圖片`
+      : imgN
+        ? `${imgN} 張圖片`
+        : `${vidN} 段影片`;
+  toast(`已加入 ${label}（將保留到按「清除全部」）`, 'success');
 
   for (const clip of newClips) {
     processClip(clip);
@@ -2435,6 +2620,49 @@ async function runMerge() {
     let subtitleVtt = null;
     let subChunkCount = 0;
 
+    // Resolve still lengths (image+MP3) + canvas size early (subs need final duration)
+    const plan = await resolveMergeClipPlan(ready, bgm, loop);
+    const clipDurations = plan.durations;
+    const baseFromPlan = clipDurations.reduce((a, b) => a + b, 0);
+    const allImages = ready.every((c) => isImageClip(c));
+
+    // When stills already baked to final length, skip loop re-encode
+    let mergeLoop = { ...loop, baseDurationSec: baseFromPlan };
+    if (
+      allImages &&
+      (loop.mode === 'once' || loop.mode === 'duration') &&
+      baseFromPlan > 0
+    ) {
+      if (loop.mode === 'duration' || (loop.mode === 'once' && plan.audioDur > 0.2)) {
+        mergeLoop = {
+          mode: 'once',
+          baseDurationSec: baseFromPlan,
+        };
+      }
+    }
+
+    let plannedOutDur = baseFromPlan;
+    if (mergeLoop.mode === 'count') {
+      plannedOutDur = baseFromPlan * Math.max(1, Math.floor(Number(mergeLoop.count) || 1));
+    } else if (loop.mode === 'duration' && mergeLoop.mode !== 'once') {
+      plannedOutDur = Math.max(0.1, Number(loop.targetSeconds) || baseFromPlan);
+    } else if (mergeLoop.mode === 'once' && loop.mode === 'duration') {
+      plannedOutDur = baseFromPlan;
+    } else if (loop.mode === 'duration') {
+      plannedOutDur = Math.max(0.1, Number(loop.targetSeconds) || baseFromPlan);
+    }
+
+    appendLog(
+      `畫幅 ${plan.outputSize.width}×${plan.outputSize.height}` +
+        `（${plan.outputSize.orientation === 'portrait' ? '直式' : plan.outputSize.orientation === 'square' ? '方形' : '橫式'}）` +
+        (plan.audioDur > 0 ? ` · 音軌 ${plan.audioDur.toFixed(2)}s` : '') +
+        ` · 輸出約 ${plannedOutDur.toFixed(2)}s` +
+        ` · 片段 [${clipDurations.map((d) => d.toFixed(2)).join(', ')}]`,
+    );
+    if (allImages && mergeLoop.mode === 'once' && (loop.mode === 'duration' || plan.audioDur > 0.2)) {
+      appendLog('圖片成片：靜態長度已寫入片段，略過循環步驟');
+    }
+
     // Script/ASR prep occupies 0–22% of bar; FFmpeg merge uses remaining
     const mergeRangeStart = wantSubs ? 0.22 : 0;
 
@@ -2442,25 +2670,12 @@ async function runMerge() {
       setProgress(0.05, '依語音稿產生字幕…');
       appendLog('使用語音稿上字幕（對齊音軌／影片時軸）');
 
-      let videoDur = estimateOutputDurationSec();
-      if (!(videoDur > 0)) {
-        videoDur = ready.reduce(
-          (s, c) => s + (Number.isFinite(c.duration) && c.duration > 0 ? c.duration : 0),
-          0,
-        );
-      }
-      let audioDur = 0;
-      if (bgm) {
-        try {
-          audioDur = await getMediaDuration(bgm);
-        } catch {
-          audioDur = 0;
-        }
-      }
-      if (!(videoDur > 0.5) && audioDur > 0.5) videoDur = audioDur;
+      let videoDur = plannedOutDur > 0.5 ? plannedOutDur : estimateOutputDurationSec();
+      if (!(videoDur > 0.5) && plan.audioDur > 0.5) videoDur = plan.audioDur;
       if (!(videoDur > 0.5)) {
-        throw new Error('無法估算影片時長，請先加入至少一段有效影片');
+        throw new Error('無法估算影片時長，請先加入影片／圖片（圖片可搭配 MP3）');
       }
+      const audioDur = plan.audioDur;
 
       // Key sync fix: time script to one audio cycle, then tile if video loops audio
       const timeline = resolveSubtitleTimeline({
@@ -2583,8 +2798,8 @@ async function runMerge() {
         );
       }
       try {
-        const audioDur = await getMediaDuration(bgm);
-        const videoDur = estimateOutputDurationSec() || audioDur;
+        const audioDur = plan.audioDur > 0.2 ? plan.audioDur : await getMediaDuration(bgm);
+        const videoDur = plannedOutDur > 0.5 ? plannedOutDur : estimateOutputDurationSec() || audioDur;
         const timeline = resolveSubtitleTimeline({
           videoDur,
           audioDur,
@@ -2635,10 +2850,6 @@ async function runMerge() {
       setProgress(mergeRangeStart, '開始合併影片…');
     }
 
-    const clipDurations = ready.map((c) =>
-      Number.isFinite(c.duration) && c.duration > 0 ? c.duration : 10,
-    );
-
     // With subtitles: merge video/audio only for PREVIEW (soft captions via <track>).
     // Formal embed happens after user finishes manual timeline tweaks.
     if (wantSubs && subtitleSrt?.trim()) {
@@ -2654,7 +2865,14 @@ async function runMerge() {
         // Defer hard embed when we have subtitles to adjust
         subtitleSrt: null,
         clipDurations,
-        loop,
+        clipMeta: ready.map((c) => ({
+          isImage: isImageClip(c),
+          width: c.width,
+          height: c.height,
+        })),
+        outputWidth: plan.outputSize.width,
+        outputHeight: plan.outputSize.height,
+        loop: mergeLoop,
         onStatus: (s) => setProgress(undefined, s),
         onProgress: (p) => {
           if (typeof p === 'number' && Number.isFinite(p)) {

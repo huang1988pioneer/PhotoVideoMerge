@@ -25,7 +25,7 @@ const CORE_CANDIDATES = [
  * @returns {Promise<Uint8Array>}
  */
 async function readBytes(file) {
-  if (!file) throw new Error('找不到影片檔案');
+  if (!file) throw new Error('找不到媒體檔案');
   if (!(file instanceof Blob)) {
     throw new Error('無效的檔案物件');
   }
@@ -245,8 +245,40 @@ async function execOrThrow(ff, args, onLog, prog = {}) {
   }
 }
 
+/** Default still length when image has no MP3 / target duration. */
+export const DEFAULT_STILL_SEC = 5;
+
 /**
- * Normalize one clip to H.264 1280x720 @ 30fps (optional AAC audio).
+ * Output canvas from source orientation (image or first video).
+ * Portrait → 720×1280, landscape → 1280×720, square → 720×720.
+ * @param {number} [srcW]
+ * @param {number} [srcH]
+ * @returns {{ width: number, height: number, orientation: 'portrait' | 'landscape' | 'square' }}
+ */
+export function resolveOutputSize(srcW, srcH) {
+  const w = Number(srcW) || 0;
+  const h = Number(srcH) || 0;
+  if (h > w && w > 0) {
+    return { width: 720, height: 1280, orientation: 'portrait' };
+  }
+  if (w > 0 && h > 0 && w === h) {
+    return { width: 720, height: 720, orientation: 'square' };
+  }
+  return { width: 1280, height: 720, orientation: 'landscape' };
+}
+
+/**
+ * True if MEMFS / file name looks like a still image.
+ * @param {string} name
+ */
+function isImageInputName(name) {
+  return /\.(jpe?g|png|gif|webp|bmp)$/i.test(name || '');
+}
+
+/**
+ * Normalize one clip to H.264 @ 30fps (optional AAC audio).
+ * Size follows opts.width/height (portrait or landscape).
+ * Still images use -loop 1 -t duration.
  * @param {FFmpeg} ff
  * @param {string} input
  * @param {string} output
@@ -255,13 +287,69 @@ async function execOrThrow(ff, args, onLog, prog = {}) {
  *   onLog?: (msg: string) => void,
  *   expectedSec?: number,
  *   onLocal?: (r: number) => void,
+ *   width?: number,
+ *   height?: number,
+ *   isImage?: boolean,
+ *   durationSec?: number,
  * }} [opts]
  */
 async function normalizeClip(ff, input, output, opts = {}) {
-  const { noAudio = false, onLog, expectedSec, onLocal } = opts;
+  const {
+    noAudio = false,
+    onLog,
+    expectedSec,
+    onLocal,
+    width = 1280,
+    height = 720,
+    isImage = false,
+    durationSec,
+  } = opts;
+  const W = Math.max(2, Math.round(Number(width) || 1280) & ~1);
+  const H = Math.max(2, Math.round(Number(height) || 720) & ~1);
   const prog = { expectedSec, onLocal };
-  const vf =
-    'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,format=yuv420p';
+  const vf = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,format=yuv420p`;
+
+  // Still image → video of fixed length (no audio track; BGM muxed later)
+  if (isImage || isImageInputName(input)) {
+    const t = Math.max(
+      0.1,
+      Number(durationSec) > 0
+        ? Number(durationSec)
+        : Number(expectedSec) > 0
+          ? Number(expectedSec)
+          : DEFAULT_STILL_SEC,
+    );
+    onLog?.(`靜態圖轉影片：${input} → ${W}x${H} · ${t.toFixed(2)}s`);
+    await execOrThrow(
+      ff,
+      [
+        '-loop',
+        '1',
+        '-framerate',
+        '30',
+        '-i',
+        input,
+        '-t',
+        String(t),
+        '-vf',
+        vf,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-an',
+        '-y',
+        output,
+      ],
+      onLog,
+      { expectedSec: t, onLocal },
+    );
+    return;
+  }
 
   const videoArgs = [
     '-i',
@@ -784,13 +872,18 @@ async function muxCustomAudio(ff, videoName, audioName, output, onLog, prog = {}
 }
 
 /**
- * Merge multiple video Files into one MP4 Blob.
+ * Merge multiple video / still-image Files into one MP4 Blob.
+ * clipMeta: per-clip isImage/width/height (stills use -loop 1).
+ * outputWidth/Height: force canvas; else inferred from first clip.
  * @param {File[]} files
  * @param {{
  *   noAudio?: boolean,
  *   audioFile?: File | null,
  *   subtitleSrt?: string | null,
  *   clipDurations?: number[],
+ *   clipMeta?: { isImage?: boolean, width?: number, height?: number }[],
+ *   outputWidth?: number,
+ *   outputHeight?: number,
  *   loop?: {
  *     mode: 'once' | 'count' | 'duration',
  *     count?: number,
@@ -804,7 +897,7 @@ async function muxCustomAudio(ff, videoName, audioName, output, onLog, prog = {}
  * @returns {Promise<{ blob: Blob, subtitlesEmbedded: boolean }>}
  */
 export async function mergeVideos(files, hooks = {}) {
-  if (!files?.length) throw new Error('請至少選擇一段影片');
+  if (!files?.length) throw new Error('請至少選擇一段影片或圖片');
 
   const {
     onLog,
@@ -814,6 +907,9 @@ export async function mergeVideos(files, hooks = {}) {
     audioFile = null,
     subtitleSrt = null,
     clipDurations = [],
+    clipMeta = [],
+    outputWidth,
+    outputHeight,
     loop = { mode: 'once' },
   } = hooks;
   const ff = await ensureFFmpeg(onLog);
@@ -823,9 +919,37 @@ export async function mergeVideos(files, hooks = {}) {
   const stripOriginalAudio = noAudio || useCustomAudio;
   const needsLoop = loop?.mode && loop.mode !== 'once';
 
+  const isImageFlags = files.map((file, i) => {
+    if (clipMeta[i]?.isImage != null) return Boolean(clipMeta[i].isImage);
+    return isImageInputName(file?.name || '');
+  });
+
+  // Output size: explicit → first clip with size → landscape default
+  let outW = Number(outputWidth) || 0;
+  let outH = Number(outputHeight) || 0;
+  if (!(outW > 0 && outH > 0)) {
+    const seed = clipMeta.find((m) => Number(m?.width) > 0 && Number(m?.height) > 0);
+    if (seed) {
+      const size = resolveOutputSize(seed.width, seed.height);
+      outW = size.width;
+      outH = size.height;
+      onLog?.(
+        `輸出畫幅：${size.orientation === 'portrait' ? '直式' : size.orientation === 'square' ? '方形' : '橫式'} ${outW}×${outH}（依素材）`,
+      );
+    } else {
+      const size = resolveOutputSize(1280, 720);
+      outW = size.width;
+      outH = size.height;
+    }
+  } else {
+    onLog?.(`輸出畫幅：${outW}×${outH}`);
+  }
+
   const durs = files.map((_, i) => {
     const d = Number(clipDurations[i]);
-    return Number.isFinite(d) && d > 0 ? d : 10;
+    if (Number.isFinite(d) && d > 0) return d;
+    // Stills without duration default shorter; videos keep 10s fallback
+    return isImageFlags[i] ? DEFAULT_STILL_SEC : 10;
   });
   const baseDur =
     Number(loop.baseDurationSec) > 0
@@ -846,7 +970,9 @@ export async function mergeVideos(files, hooks = {}) {
     stages.push({
       id: `norm${i}`,
       weight: Math.max(8, durs[i]),
-      label: `標準化第 ${i + 1} / ${files.length} 段…`,
+      label: isImageFlags[i]
+        ? `圖片轉影片 ${i + 1} / ${files.length}…`
+        : `標準化第 ${i + 1} / ${files.length} 段…`,
     });
   }
   stages.push({
@@ -904,6 +1030,7 @@ export async function mergeVideos(files, hooks = {}) {
       onLog?.(`讀取 ${label}（${file.size} bytes）…`);
 
       const bytes = await readBytes(file);
+      // Keep image extensions so normalize can detect stills
       const name = `in${i}.${extFromName(file.name)}`;
       await ff.writeFile(name, bytes);
       written.push(name);
@@ -924,7 +1051,7 @@ export async function mergeVideos(files, hooks = {}) {
 
     const baseName = 'base.mp4';
 
-    // 1) Normalize every input to shared format
+    // 1) Normalize every input to shared format / canvas size
     const normalized = [];
     const inputCount = files.length;
     for (let i = 0; i < inputCount; i++) {
@@ -934,6 +1061,10 @@ export async function mergeVideos(files, hooks = {}) {
         noAudio: stripOriginalAudio,
         onLog,
         expectedSec: durs[i],
+        durationSec: durs[i],
+        isImage: isImageFlags[i],
+        width: outW,
+        height: outH,
         onLocal: (r) => tracker.update(r),
       });
       normalized.push(out);
