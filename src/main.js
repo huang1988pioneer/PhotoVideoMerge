@@ -1054,6 +1054,47 @@ function clearScriptAndSubtitles() {
 }
 
 /**
+ * Unique export stamp: local datetime to ms + short random.
+ * Avoids Downloads collisions when exporting twice in the same second
+ * or re-downloading the same result (Windows would otherwise add " (1)").
+ * e.g. 2026-07-26-16-31-06-123-a3f2
+ */
+function exportStamp() {
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  const base = [
+    d.getFullYear(),
+    p(d.getMonth() + 1),
+    p(d.getDate()),
+    p(d.getHours()),
+    p(d.getMinutes()),
+    p(d.getSeconds()),
+    p(d.getMilliseconds(), 3),
+  ].join('-');
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `${base}-${rand}`;
+}
+
+/**
+ * @param {string} prefix e.g. merged | preview | final | subtitles
+ * @param {string} [ext]
+ */
+function exportFilename(prefix, ext = 'mp4') {
+  return `${prefix}-${exportStamp()}.${ext}`;
+}
+
+/**
+ * Refresh download attribute right before click so re-downloads don't collide.
+ * @param {HTMLAnchorElement | null | undefined} el
+ * @param {string} prefix
+ * @param {string} [ext]
+ */
+function refreshDownloadName(el, prefix, ext = 'mp4') {
+  if (!el) return;
+  el.download = exportFilename(prefix, ext);
+}
+
+/**
  * Trigger a file download reliably (blob + temporary <a>).
  * @param {string} filename
  * @param {BlobPart} data
@@ -1079,7 +1120,9 @@ function downloadSrt() {
     toast('目前沒有可下載的字幕', 'error');
     return;
   }
-  const name = lastSrtFilename || 'subtitles.srt';
+  // Fresh name each download to avoid "subtitles-….srt (1)" collisions
+  const name = exportFilename('subtitles', 'srt');
+  lastSrtFilename = name;
   // UTF-8 BOM helps Windows Notepad / some players recognize Chinese SRT
   const bom = '\uFEFF';
   downloadBlob(name, bom + lastSrtText, 'application/x-subrip;charset=utf-8');
@@ -1548,7 +1591,9 @@ function syncResultPhaseUI() {
     els.btnDownloadPreview.hidden = !resultUrl;
     if (resultUrl) {
       els.btnDownloadPreview.href = resultUrl;
-      els.btnDownloadPreview.download = `preview-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.mp4`;
+      if (!els.btnDownloadPreview.download || els.btnDownloadPreview.download === 'preview.mp4') {
+        els.btnDownloadPreview.download = exportFilename('preview');
+      }
       els.btnDownloadPreview.textContent = hasSubs
         ? '下載預覽影片（無嵌入字幕）'
         : '下載預覽影片';
@@ -1561,7 +1606,8 @@ function syncResultPhaseUI() {
       els.btnDownloadCollapsed.hidden = false;
       els.btnDownloadCollapsed.href = url;
       els.btnDownloadCollapsed.download =
-        els.btnDownload?.download || (hasFinalExport ? 'final.mp4' : 'merged.mp4');
+        els.btnDownload?.download ||
+        exportFilename(hasFinalExport ? 'final' : 'merged');
       els.btnDownloadCollapsed.textContent = hasFinalExport ? '下載正式影片' : '下載影片';
     } else {
       els.btnDownloadCollapsed.hidden = true;
@@ -1779,7 +1825,7 @@ function persistPreviewBlob(blob, hasSubtitles) {
   if (!(blob instanceof Blob) || !blob.size) return;
   savePreview(blob, {
     hasSubtitles,
-    filename: `preview-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.mp4`,
+    filename: exportFilename('preview'),
   }).catch((err) => console.warn('無法保存預覽影片', err));
 }
 
@@ -2094,11 +2140,14 @@ async function runFormalExport() {
     finalUrl = URL.createObjectURL(blob);
     hasFinalExport = true;
 
-    const name = `final-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.mp4`;
+    const name = exportFilename('final');
     if (els.btnDownload) {
       els.btnDownload.href = finalUrl;
       els.btnDownload.download = name;
       els.btnDownload.hidden = false;
+    }
+    if (els.btnDownloadCollapsed) {
+      els.btnDownloadCollapsed.download = name;
     }
 
     stopProgressTimer();
@@ -2997,13 +3046,16 @@ async function runMerge() {
     bindResultTimecode();
     persistPreviewBlob(blob, Boolean(wantSubs && subtitleSrt?.trim()));
 
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const stamp = exportStamp();
     if (els.btnDownload) {
       els.btnDownload.download = `merged-${stamp}.mp4`;
     }
     if (els.btnDownloadPreview) {
       els.btnDownloadPreview.download = `preview-${stamp}.mp4`;
       els.btnDownloadPreview.href = resultUrl;
+    }
+    if (els.btnDownloadCollapsed) {
+      els.btnDownloadCollapsed.download = `merged-${stamp}.mp4`;
     }
 
     if (subtitleSrt && subtitleSrt.trim()) {
@@ -3179,6 +3231,22 @@ els.btnDownloadSrt.addEventListener('click', (e) => {
 els.btnDownloadSrtCollapsed.addEventListener('click', (e) => {
   e.preventDefault();
   downloadSrt();
+});
+// Re-download same result with a new name so Windows won't create " (1)" copies
+els.btnDownload?.addEventListener('click', () => {
+  refreshDownloadName(els.btnDownload, hasFinalExport ? 'final' : 'merged');
+  if (els.btnDownloadCollapsed) {
+    els.btnDownloadCollapsed.download = els.btnDownload.download;
+  }
+});
+els.btnDownloadPreview?.addEventListener('click', () => {
+  refreshDownloadName(els.btnDownloadPreview, 'preview');
+});
+els.btnDownloadCollapsed?.addEventListener('click', () => {
+  refreshDownloadName(els.btnDownloadCollapsed, hasFinalExport ? 'final' : 'merged');
+  if (els.btnDownload) {
+    els.btnDownload.download = els.btnDownloadCollapsed.download;
+  }
 });
 // Keep merge button label in sync when subtitle options change
 els.optScriptSubs?.addEventListener('change', () => updateToolbar());
