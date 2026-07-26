@@ -249,11 +249,18 @@ async function execOrThrow(ff, args, onLog, prog = {}) {
 export const DEFAULT_STILL_SEC = 5;
 
 /**
- * Output canvas from source aspect ratio (image or first video).
- * Keeps original proportions at 1080p class:
- * - short edge targets 1080
- * - long edge capped at 1920
- * Examples: 16:9 → 1920×1080, 9:16 → 1080×1920, 3:4 → 1080×1440, 4:3 → 1440×1080.
+ * Max long-edge for output (browser / FFmpeg.wasm memory safety).
+ * Only downscales sources larger than this; never upscales (upscale = blur).
+ */
+export const MAX_OUTPUT_LONG_EDGE = 4096;
+
+/**
+ * Output canvas from source pixel size (image or first video).
+ * Preserves native resolution and aspect ratio so photo→video stays sharp:
+ * - use original width×height when possible
+ * - only downscale if long edge exceeds MAX_OUTPUT_LONG_EDGE
+ * - never upscale smaller sources
+ * Examples: 4032×3024 → 4032×3024, 6000×4000 → 4096×2730, 800×600 → 800×600.
  * @param {number} [srcW]
  * @param {number} [srcH]
  * @returns {{ width: number, height: number, orientation: 'portrait' | 'landscape' | 'square' }}
@@ -265,31 +272,13 @@ export function resolveOutputSize(srcW, srcH) {
     return { width: 1920, height: 1080, orientation: 'landscape' };
   }
 
-  const SHORT = 1080;
-  const LONG_MAX = 1920;
-  const aspect = w / h;
-
-  let outW;
-  let outH;
-  if (w === h) {
-    outW = SHORT;
-    outH = SHORT;
-  } else if (w > h) {
-    // landscape: short = height
-    outH = SHORT;
-    outW = outH * aspect;
-    if (outW > LONG_MAX) {
-      outW = LONG_MAX;
-      outH = outW / aspect;
-    }
-  } else {
-    // portrait: short = width
-    outW = SHORT;
-    outH = outW / aspect;
-    if (outH > LONG_MAX) {
-      outH = LONG_MAX;
-      outW = outH * aspect;
-    }
+  let outW = w;
+  let outH = h;
+  const longEdge = Math.max(outW, outH);
+  if (longEdge > MAX_OUTPUT_LONG_EDGE) {
+    const scale = MAX_OUTPUT_LONG_EDGE / longEdge;
+    outW *= scale;
+    outH *= scale;
   }
 
   // yuv420 / libx264 need even dimensions
@@ -310,9 +299,55 @@ function isImageInputName(name) {
 }
 
 /**
+ * High-quality scale+pad chain (lanczos reduces blur vs default bilinear).
+ * @param {number} W
+ * @param {number} H
+ */
+function buildNormalizeVf(W, H) {
+  return (
+    `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos,` +
+    `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,` +
+    `setsar=1,fps=30,format=yuv420p`
+  );
+}
+
+/**
+ * H.264 encode args: stills use stillimage + lower CRF to avoid blur/blockiness.
+ * @param {boolean} isStill
+ * @returns {string[]}
+ */
+function h264EncodeArgs(isStill) {
+  // stillimage + lower CRF keeps photo detail; veryfast is a wasm-friendly balance
+  if (isStill) {
+    return [
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-tune',
+      'stillimage',
+      '-crf',
+      '16',
+      '-pix_fmt',
+      'yuv420p',
+    ];
+  }
+  return [
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '18',
+    '-pix_fmt',
+    'yuv420p',
+  ];
+}
+
+/**
  * Normalize one clip to H.264 @ 30fps (optional AAC audio).
  * Size follows opts.width/height (portrait or landscape).
- * Still images use -loop 1 -t duration.
+ * Still images use -loop 1 -t duration with stillimage-tuned encode.
  * @param {FFmpeg} ff
  * @param {string} input
  * @param {string} output
@@ -341,10 +376,11 @@ async function normalizeClip(ff, input, output, opts = {}) {
   const W = Math.max(2, Math.round(Number(width) || 1920) & ~1);
   const H = Math.max(2, Math.round(Number(height) || 1080) & ~1);
   const prog = { expectedSec, onLocal };
-  const vf = `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,format=yuv420p`;
+  const vf = buildNormalizeVf(W, H);
+  const still = isImage || isImageInputName(input);
 
   // Still image → video of fixed length (no audio track; BGM muxed later)
-  if (isImage || isImageInputName(input)) {
+  if (still) {
     const t = Math.max(
       0.1,
       Number(durationSec) > 0
@@ -353,7 +389,7 @@ async function normalizeClip(ff, input, output, opts = {}) {
           ? Number(expectedSec)
           : DEFAULT_STILL_SEC,
     );
-    onLog?.(`靜態圖轉影片：${input} → ${W}x${H} · ${t.toFixed(2)}s`);
+    onLog?.(`靜態圖轉影片（高畫質）：${input} → ${W}x${H} · ${t.toFixed(2)}s`);
     await execOrThrow(
       ff,
       [
@@ -367,14 +403,7 @@ async function normalizeClip(ff, input, output, opts = {}) {
         String(t),
         '-vf',
         vf,
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-crf',
-        '23',
-        '-pix_fmt',
-        'yuv420p',
+        ...h264EncodeArgs(true),
         '-an',
         '-y',
         output,
@@ -385,18 +414,7 @@ async function normalizeClip(ff, input, output, opts = {}) {
     return;
   }
 
-  const videoArgs = [
-    '-i',
-    input,
-    '-vf',
-    vf,
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
-    '-crf',
-    '23',
-  ];
+  const videoArgs = ['-i', input, '-vf', vf, ...h264EncodeArgs(false)];
 
   if (noAudio) {
     await execOrThrow(ff, [...videoArgs, '-an', '-y', output], onLog, prog);
@@ -415,7 +433,7 @@ async function normalizeClip(ff, input, output, opts = {}) {
         '-ac',
         '2',
         '-b:a',
-        '128k',
+        '192k',
         '-shortest',
         '-y',
         output,
@@ -506,20 +524,12 @@ async function concatCopy(ff, names, output, onLog, written, prog = {}) {
  * @param {boolean} noAudio
  */
 function reencodeTailArgs(noAudio) {
-  const args = [
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
-    '-crf',
-    '23',
-    '-pix_fmt',
-    'yuv420p',
-  ];
+  // Match normalize quality so loop/trim does not reintroduce blockiness
+  const args = [...h264EncodeArgs(false)];
   if (noAudio) {
     args.push('-an');
   } else {
-    args.push('-c:a', 'aac', '-b:a', '128k');
+    args.push('-c:a', 'aac', '-b:a', '192k');
   }
   args.push('-movflags', '+faststart', '-y', 'output.mp4');
   return args;
