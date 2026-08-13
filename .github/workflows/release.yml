@@ -1,0 +1,142 @@
+name: Release desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without v prefix (e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            asset: win-x64
+          - os: macos-latest
+            rid: osx-x64
+            asset: macos-x64
+          - os: macos-latest
+            rid: osx-arm64
+            asset: macos-arm64
+          - os: ubuntu-latest
+            rid: linux-x64
+            asset: linux-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        shell: bash
+        run: |
+          dotnet publish VideoMerge.Avalonia/VideoMerge.Avalonia.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            -p:Version=${{ steps.ver.outputs.version }} \
+            -p:InformationalVersion=${{ steps.ver.outputs.version }} \
+            -p:DebugType=None \
+            -p:DebugSymbols=false \
+            -o publish
+
+      - name: Package zip
+        shell: bash
+        run: |
+          bash VideoMerge.Avalonia/packaging/package.sh \
+            "${{ matrix.rid }}" \
+            "${{ matrix.asset }}" \
+            publish \
+            dist \
+            "${{ steps.ver.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoMerge-${{ matrix.asset }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          VER="${{ steps.ver.outputs.version }}"
+          NOTES="$(mktemp)"
+          cat > "$NOTES" <<EOF
+          ## VideoMerge $VER
+
+          Desktop builds (Avalonia, self-contained, no .NET install required).
+
+          | File | Platform |
+          | --- | --- |
+          | \`VideoMerge-$VER-win-x64.zip\` | Windows 10/11 x64 |
+          | \`VideoMerge-$VER-macos-arm64.zip\` | macOS Apple Silicon |
+          | \`VideoMerge-$VER-macos-x64.zip\` | macOS Intel (also Apple Silicon via Rosetta) |
+          | \`VideoMerge-$VER-linux-x64.zip\` | Linux x64 |
+
+          **Requires [FFmpeg](https://ffmpeg.org/)** (\`ffmpeg\` + \`ffprobe\` on PATH, or pick the binary in the app).
+
+          - Windows: run \`VideoMerge.Avalonia.exe\`
+          - macOS: open \`VideoMerge.app\` (unsigned — allow it in Privacy & Security)
+          - Linux: \`./VideoMerge.sh\` or \`./VideoMerge.Avalonia\`
+
+          Clip playback uses bundled LibVLC on Windows and Intel Mac. Linux and Apple Silicon fall back to the system player if needed.
+          EOF
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/*.zip --clobber
+          else
+            gh release create "$TAG" artifacts/*.zip \
+              --title "VideoMerge $VER" \
+              --notes-file "$NOTES"
+          fi

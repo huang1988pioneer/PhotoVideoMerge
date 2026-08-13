@@ -20,9 +20,24 @@
 
 ## 桌面版（Avalonia）
 
-同功能的 Windows 桌面程式在 `VideoMerge.Avalonia/`：加入影片／圖片、預覽首尾幀、**單獨播放每段影片**、自訂音軌、語音稿字幕、循環延長，並以本機 FFmpeg 合併為 MP4。
+同功能的桌面程式在 `VideoMerge.Avalonia/`：加入影片／圖片、預覽首尾幀、**單獨播放每段影片**、自訂音軌、語音稿字幕、循環延長，並以本機 FFmpeg 合併為 MP4。
 
-**需求：** [.NET 8 SDK](https://dotnet.microsoft.com/download) 與 [FFmpeg](https://ffmpeg.org/)（`ffmpeg` / `ffprobe` 在 PATH，或啟動後按「指定 FFmpeg」）。
+**需求：** 系統上的 [FFmpeg](https://ffmpeg.org/)（`ffmpeg` / `ffprobe` 在 PATH，或啟動後按「指定 FFmpeg」）。正式版 zip **不需安裝 .NET**。
+
+### 下載 Release
+
+到 [Releases](https://github.com/huang1988pioneer/PhotoVideoMerge/releases) 下載對應平台：
+
+| 檔案 | 平台 |
+| --- | --- |
+| `VideoMerge-*-win-x64.zip` | Windows 10/11 x64 |
+| `VideoMerge-*-macos-arm64.zip` | macOS Apple Silicon |
+| `VideoMerge-*-macos-x64.zip` | macOS Intel（Apple Silicon 可用 Rosetta） |
+| `VideoMerge-*-linux-x64.zip` | Linux x64 |
+
+Windows 解壓後執行 `VideoMerge.Avalonia.exe`；macOS 開啟 `VideoMerge.app`（未簽名，需在「隱私權與安全性」允許）；Linux 執行 `./VideoMerge.sh`。
+
+從原始碼啟動（需 [.NET 8 SDK](https://dotnet.microsoft.com/download)）：
 
 ```bat
 start-desktop.bat
