@@ -306,11 +306,11 @@ app.innerHTML = `
     <section class="panel" aria-labelledby="clips-title">
       <div class="panel-head">
         <h2 id="clips-title">片段與首尾幀</h2>
-        <p class="hint" id="clips-count">尚未加入素材</p>
+        <p class="hint" id="clips-count">尚未加入素材 · 影片可單獨播放</p>
       </div>
       <div id="clips-root">
         <div class="empty-state">
-          <p>加入<strong>影片</strong>或<strong>圖片</strong>後，這裡會顯示首尾幀／靜態預覽。圖片可搭配 MP3 輸出直式或橫式影片。</p>
+          <p>加入<strong>影片</strong>或<strong>圖片</strong>後，這裡會顯示首尾幀／靜態預覽，<strong>每段影片可單獨播放</strong>。圖片可搭配 MP3 輸出直式或橫式影片。</p>
         </div>
       </div>
 
@@ -634,6 +634,7 @@ function bindResultTimecode() {
   video.addEventListener('loadedmetadata', tick);
   video.addEventListener('durationchange', tick);
   video.addEventListener('play', () => {
+    pauseClipPlayers(video);
     // denser updates while playing (timeupdate is ~4Hz; rAF for smoother ms feel)
     const loop = () => {
       if (video.paused || video.ended) return;
@@ -2400,7 +2401,7 @@ function updateToolbar() {
   syncAudioUI();
 
   if (!hasClips) {
-    els.clipsCount.textContent = '尚未加入素材';
+    els.clipsCount.textContent = '尚未加入素材 · 影片可單獨播放';
   } else {
     const imgN = ready.filter((c) => isImageClip(c)).length;
     const vidN = ready.length - imgN;
@@ -2418,11 +2419,229 @@ function updateToolbar() {
   syncExtendUI();
 }
 
+/** Object URLs for per-clip playback (revoked on remove / clear). */
+/** @type {Map<string, string>} */
+const clipObjectUrls = new Map();
+/** @type {string | null} */
+let openClipPlayerId = null;
+/** Scroll the opened player into view only after a user click */
+let clipPlayerShouldScroll = false;
+
+function clipFilePlayable(clip) {
+  return Boolean(clip?.file instanceof Blob && clip.file.size > 0);
+}
+
+function getClipObjectUrl(clip) {
+  if (!clip?.id || !clipFilePlayable(clip)) return null;
+  let url = clipObjectUrls.get(clip.id);
+  if (!url) {
+    url = URL.createObjectURL(clip.file);
+    clipObjectUrls.set(clip.id, url);
+  }
+  return url;
+}
+
+function revokeClipObjectUrl(id) {
+  const url = clipObjectUrls.get(id);
+  if (url) {
+    URL.revokeObjectURL(url);
+    clipObjectUrls.delete(id);
+  }
+  if (openClipPlayerId === id) {
+    openClipPlayerId = null;
+    clipPlayerShouldScroll = false;
+  }
+}
+
+function revokeAllClipObjectUrls() {
+  for (const url of clipObjectUrls.values()) {
+    URL.revokeObjectURL(url);
+  }
+  clipObjectUrls.clear();
+  openClipPlayerId = null;
+  clipPlayerShouldScroll = false;
+}
+
+/**
+ * Pause clip preview players, optionally leaving one video running.
+ * @param {HTMLMediaElement | null} [except]
+ */
+function pauseClipPlayers(except = null) {
+  els.clipsRoot?.querySelectorAll('.clip-player-video').forEach((v) => {
+    if (v === except) return;
+    try {
+      v.pause();
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+/**
+ * Pause merged-preview video when a source clip starts playing.
+ * @param {HTMLMediaElement | null} [except]
+ */
+function pauseOtherMedia(except = null) {
+  try {
+    if (els.resultVideo && els.resultVideo !== except) {
+      els.resultVideo.pause();
+    }
+  } catch {
+    /* ignore */
+  }
+  pauseClipPlayers(except);
+}
+
+function teardownClipVideo(video) {
+  if (!video) return;
+  try {
+    video.pause();
+  } catch {
+    /* ignore */
+  }
+  video.removeAttribute('src');
+  try {
+    video.load();
+  } catch {
+    /* ignore */
+  }
+  video.remove();
+}
+
+function detachLiveClipVideo() {
+  const video = els.clipsRoot?.querySelector('.clip-player-video');
+  if (!video) return null;
+  video.remove();
+  return video;
+}
+
+/**
+ * @param {string} id
+ * @param {{ fromStart?: boolean }} [opts]
+ */
+function openClipPlayer(id, opts = {}) {
+  const clip = clips.find((c) => c.id === id);
+  if (!clip) return;
+  if (isImageClip(clip)) {
+    toast('圖片沒有可播放的影片', 'info');
+    return;
+  }
+  if (!clipFilePlayable(clip)) {
+    toast('這段影片檔案無法播放', 'error');
+    return;
+  }
+
+  const alreadyOpen = openClipPlayerId === id;
+  if (alreadyOpen) {
+    const video = els.clipsRoot?.querySelector('.clip-player-video');
+    if (video) {
+      if (opts.fromStart) {
+        try {
+          video.currentTime = 0;
+        } catch {
+          /* ignore */
+        }
+      }
+      pauseOtherMedia(video);
+      video.play().catch(() => {});
+      return;
+    }
+  }
+
+  openClipPlayerId = id;
+  clipPlayerShouldScroll = true;
+  renderClips();
+}
+
+function closeClipPlayer() {
+  const video = els.clipsRoot?.querySelector('.clip-player-video');
+  teardownClipVideo(video);
+  openClipPlayerId = null;
+  clipPlayerShouldScroll = false;
+  renderClips();
+}
+
+function mountOpenClipPlayer(liveVideo) {
+  if (!openClipPlayerId) {
+    if (liveVideo) teardownClipVideo(liveVideo);
+    return;
+  }
+
+  const clip = clips.find((c) => c.id === openClipPlayerId);
+  const host = els.clipsRoot?.querySelector(
+    `[data-player-host="${CSS.escape(openClipPlayerId)}"]`,
+  );
+  if (!clip || isImageClip(clip) || !host) {
+    if (liveVideo) teardownClipVideo(liveVideo);
+    openClipPlayerId = null;
+    return;
+  }
+
+  if (liveVideo && liveVideo.dataset.clipId === clip.id) {
+    host.hidden = false;
+    host.replaceChildren(liveVideo);
+    if (clipPlayerShouldScroll) {
+      clipPlayerShouldScroll = false;
+      host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    return;
+  }
+
+  if (liveVideo) teardownClipVideo(liveVideo);
+
+  const url = getClipObjectUrl(clip);
+  if (!url) {
+    openClipPlayerId = null;
+    host.hidden = true;
+    return;
+  }
+
+  const video = document.createElement('video');
+  video.className = 'clip-player-video';
+  video.controls = true;
+  video.playsInline = true;
+  video.setAttribute('playsinline', '');
+  video.preload = 'metadata';
+  video.dataset.clipId = clip.id;
+  video.setAttribute('aria-label', `播放 ${clip.name}`);
+  if (clip.firstFrame) video.poster = clip.firstFrame;
+  video.src = url;
+
+  video.addEventListener('play', () => pauseOtherMedia(video));
+  video.addEventListener('error', () => {
+    toast(
+      `無法在瀏覽器直接播放：${clip.name}（合併仍可能成功）`,
+      'error',
+    );
+  });
+
+  host.hidden = false;
+  host.replaceChildren(video);
+
+  const playNow = () => {
+    pauseOtherMedia(video);
+    video.play().catch(() => {
+      /* autoplay blocked — native controls still work */
+    });
+  };
+  if (video.readyState >= 2) playNow();
+  else video.addEventListener('loadeddata', playNow, { once: true });
+
+  if (clipPlayerShouldScroll) {
+    clipPlayerShouldScroll = false;
+    host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
 function renderClips() {
+  const liveVideo = detachLiveClipVideo();
+
   if (clips.length === 0) {
+    if (liveVideo) teardownClipVideo(liveVideo);
+    revokeAllClipObjectUrls();
     els.clipsRoot.innerHTML = `
       <div class="empty-state">
-        <p>加入<strong>影片</strong>或<strong>圖片</strong>後，這裡會顯示首尾幀／靜態預覽。</p>
+        <p>加入<strong>影片</strong>或<strong>圖片</strong>後，這裡會顯示首尾幀／靜態預覽，<strong>每段影片可單獨播放</strong>。</p>
       </div>
     `;
     updateToolbar();
@@ -2446,16 +2665,30 @@ function renderClips() {
     const oriLabel =
       ori === 'portrait' ? '直式' : ori === 'landscape' ? '橫式' : ori === 'square' ? '方形' : null;
 
+    const playerOpen = !image && openClipPlayerId === clip.id;
+    const canPlay = !image && clipFilePlayable(clip);
+
     const statusHtml =
       clip.status === 'loading'
         ? `<span class="clip-status">${image ? '正在讀取圖片…' : '正在擷取首尾幀…'}</span>`
         : clip.status === 'error'
           ? `<span class="clip-status is-error">${escapeHtml(clip.error || '讀取失敗')}</span>`
-          : `<span class="clip-status is-ok">${image ? '圖片就緒' : '首尾幀就緒'}${oriLabel ? ` · ${oriLabel}` : ''}</span>`;
+          : `<span class="clip-status is-ok">${image ? '圖片就緒' : playerOpen ? '正在播放此段' : '首尾幀就緒 · 可播放'}${oriLabel ? ` · ${oriLabel}` : ''}</span>`;
+    const playOverlay =
+      canPlay && !playerOpen
+        ? `<button type="button" class="frame-play" data-action="play" data-id="${clip.id}" aria-label="播放 ${escapeHtml(clip.name)}">
+            <span class="frame-play-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
+            </span>
+            <span class="frame-play-label">播放</span>
+          </button>`
+        : '';
 
-    const firstInner = clip.firstFrame
-      ? `<img src="${clip.firstFrame}" alt="${escapeHtml(clip.name)} ${image ? '預覽' : '首幀'}" />`
-      : `<div class="placeholder">${clip.status === 'loading' ? '載入中…' : '—'}</div>`;
+    const firstInner = `${
+      clip.firstFrame
+        ? `<img src="${clip.firstFrame}" alt="${escapeHtml(clip.name)} ${image ? '預覽' : '首幀'}" />`
+        : `<div class="placeholder">${clip.status === 'loading' ? '載入中…' : '—'}</div>`
+    }${playOverlay}`;
 
     const lastInner = clip.lastFrame
       ? `<img src="${clip.lastFrame}" alt="${escapeHtml(clip.name)} ${image ? '預覽' : '尾幀'}" />`
@@ -2468,6 +2701,8 @@ function renderClips() {
           ? '依音軌'
           : `靜態 ${DEFAULT_STILL_SEC}s`
       : formatDuration(clip.duration);
+
+    if (playerOpen) li.classList.add('is-playing');
 
     li.innerHTML = `
       <div class="clip-order">
@@ -2486,17 +2721,27 @@ function renderClips() {
       </div>
       <div class="clip-body">
         <div class="clip-meta">
-          <p class="clip-name" title="${escapeHtml(clip.name)}">${escapeHtml(clip.name)}${image ? ' <span class="clip-kind-tag">圖片</span>' : ''}</p>
-          <div class="clip-stats">
-            <span>${durLabel}</span>
-            <span>${formatBytes(clip.size)}</span>
-            <span>${clip.width && clip.height ? `${clip.width}×${clip.height}` : '—'}${oriLabel ? ` · ${oriLabel}` : ''}</span>
+          <div class="clip-meta-main">
+            <p class="clip-name" title="${escapeHtml(clip.name)}">${escapeHtml(clip.name)}${image ? ' <span class="clip-kind-tag">圖片</span>' : ''}</p>
+            <div class="clip-stats">
+              <span>${durLabel}</span>
+              <span>${formatBytes(clip.size)}</span>
+              <span>${clip.width && clip.height ? `${clip.width}×${clip.height}` : '—'}${oriLabel ? ` · ${oriLabel}` : ''}</span>
+            </div>
           </div>
+          ${
+            image
+              ? ''
+              : `<button type="button" class="btn btn-ghost btn-sm clip-play-btn" data-action="${playerOpen ? 'close-player' : 'play'}" data-id="${clip.id}" aria-expanded="${playerOpen ? 'true' : 'false'}" ${canPlay ? '' : 'disabled'}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">${playerOpen ? '<path d="M6 6h12v12H6z"/>' : '<path d="M8 5.5v13l11-6.5-11-6.5z"/>'}</svg>
+            ${playerOpen ? '關閉播放' : '播放此段'}
+          </button>`
+          }
         </div>
         <div class="frames-row${image ? ' is-still' : ''}">
           <div class="frame-cell">
             <span class="frame-label">${image ? '預覽' : '首幀'}</span>
-            <div class="frame-thumb${ori === 'portrait' ? ' is-portrait' : ''}">${firstInner}</div>
+            <div class="frame-thumb${ori === 'portrait' ? ' is-portrait' : ''}${canPlay && !playerOpen ? ' is-playable' : ''}">${firstInner}</div>
           </div>
           ${
             image
@@ -2511,6 +2756,11 @@ function renderClips() {
           </div>`
           }
         </div>
+        ${
+          image
+            ? ''
+            : `<div class="clip-player${ori === 'portrait' ? ' is-portrait' : ''}" data-player-host="${clip.id}" ${playerOpen ? '' : 'hidden'}></div>`
+        }
         ${statusHtml}
       </div>
     `;
@@ -2519,6 +2769,7 @@ function renderClips() {
   });
 
   els.clipsRoot.replaceChildren(list);
+  mountOpenClipPlayer(liveVideo);
   updateToolbar();
 }
 
@@ -2646,6 +2897,11 @@ function moveClip(id, dir) {
 }
 
 function removeClip(id) {
+  if (openClipPlayerId === id) {
+    teardownClipVideo(els.clipsRoot?.querySelector('.clip-player-video'));
+    openClipPlayerId = null;
+  }
+  revokeClipObjectUrl(id);
   clips = clips.filter((c) => c.id !== id);
   renderClips();
   schedulePersistClips();
@@ -2657,6 +2913,8 @@ function removeClip(id) {
 
 function clearAll() {
   if (merging || exporting) return;
+  teardownClipVideo(els.clipsRoot?.querySelector('.clip-player-video'));
+  revokeAllClipObjectUrls();
   clips = [];
   clearAudioFile(true);
   clearClips().catch(() => {});
@@ -3368,8 +3626,17 @@ els.dropzone.addEventListener('drop', (e) => {
 
 els.clipsRoot.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-action]');
-  if (!btn || merging) return;
+  if (!btn) return;
   const { action, id } = btn.dataset;
+  if (action === 'play') {
+    openClipPlayer(id, { fromStart: false });
+    return;
+  }
+  if (action === 'close-player') {
+    closeClipPlayer();
+    return;
+  }
+  if (merging) return;
   if (action === 'up') moveClip(id, -1);
   if (action === 'down') moveClip(id, 1);
   if (action === 'remove') removeClip(id);

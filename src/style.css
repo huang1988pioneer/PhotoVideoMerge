@@ -689,6 +689,11 @@ body {
   animation: clip-in 280ms var(--ease-out) both;
 }
 
+.clip-card.is-playing {
+  border-color: oklch(0.42 0.12 28);
+  background: oklch(0.2 0.02 28);
+}
+
 @keyframes clip-in {
   from {
     opacity: 0;
@@ -753,9 +758,19 @@ body {
 .clip-meta {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-2) var(--space-4);
+}
+
+.clip-meta-main {
+  min-width: 0;
+  flex: 1 1 12rem;
+}
+
+.clip-play-btn {
+  flex: 0 0 auto;
+  gap: 0.4rem;
 }
 
 .clip-name {
@@ -834,11 +849,87 @@ body {
   max-width: 140px;
 }
 
+.frame-thumb.is-playable {
+  cursor: pointer;
+}
+
 .frame-thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.frame-play {
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: oklch(0.1 0 0 / 0.38);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 160ms var(--ease-out);
+}
+
+.frame-play:hover,
+.frame-play:focus-visible {
+  background: oklch(0.1 0 0 / 0.55);
+  outline: none;
+}
+
+.frame-play:focus-visible .frame-play-icon {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.frame-play-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: var(--ink);
+  box-shadow: 0 4px 12px oklch(0 0 0 / 0.4);
+}
+
+.frame-play-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-shadow: 0 1px 8px oklch(0 0 0 / 0.65);
+}
+
+.clip-player {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: oklch(0.08 0 0);
+}
+
+.clip-player[hidden] {
+  display: none;
+}
+
+.clip-player-video {
+  display: block;
+  width: 100%;
+  max-height: min(70vh, 480px);
+  background: oklch(0.08 0 0);
+}
+
+.clip-player.is-portrait .clip-player-video {
+  width: auto;
+  max-width: 100%;
+  max-height: min(70vh, 560px);
+  margin-inline: auto;
 }
 
 .frame-thumb .placeholder {
@@ -1993,5 +2084,9 @@ body {
 
   .frame-connector svg {
     transform: rotate(90deg);
+  }
+
+  .clip-play-btn {
+    width: 100%;
   }
 }

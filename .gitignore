@@ -19,6 +19,12 @@ samples/*.wav
 *.mp4
 *.mp3
 
+# .NET / Avalonia
+bin/
+obj/
+*.user
+*.rsuser
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

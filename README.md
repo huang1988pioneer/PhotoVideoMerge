@@ -18,6 +18,22 @@
 - **延長 / 循環**：依「重複次數」或「目標時長」自動循環整段並裁切
 - 一鍵合併為 MP4 並預覽、下載
 
+## 桌面版（Avalonia）
+
+同功能的 Windows 桌面程式在 `VideoMerge.Avalonia/`：加入影片／圖片、預覽首尾幀、**單獨播放每段影片**、自訂音軌、語音稿字幕、循環延長，並以本機 FFmpeg 合併為 MP4。
+
+**需求：** [.NET 8 SDK](https://dotnet.microsoft.com/download) 與 [FFmpeg](https://ffmpeg.org/)（`ffmpeg` / `ffprobe` 在 PATH，或啟動後按「指定 FFmpeg」）。
+
+```bat
+start-desktop.bat
+```
+
+或：
+
+```bash
+dotnet run --project VideoMerge.Avalonia -c Release
+```
+
 ## 本機啟動
 
 **需求：** [Node.js](https://nodejs.org/) 18+（含 npm）

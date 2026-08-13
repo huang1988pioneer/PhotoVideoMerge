@@ -1,0 +1,44 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vlc="clr-namespace:LibVLCSharp.Avalonia;assembly=LibVLCSharp.Avalonia"
+        x:Class="VideoMerge.Avalonia.Views.PlayerWindow"
+        Width="960" Height="600"
+        MinWidth="480" MinHeight="320"
+        WindowStartupLocation="CenterOwner"
+        Background="#111111"
+        Foreground="#F4F1EE">
+  <Grid RowDefinitions="*,Auto">
+    <Panel Background="#000000">
+      <vlc:VideoView x:Name="VideoView"
+                     HorizontalAlignment="Stretch"
+                     VerticalAlignment="Stretch" />
+      <TextBlock x:Name="FallbackHint"
+                 IsVisible="False"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Center"
+                 Foreground="#A89A94"
+                 Text="無法內嵌播放，已改用系統播放器" />
+    </Panel>
+    <Border Grid.Row="1" Background="#1C1C1C" Padding="16,12" BorderBrush="#333" BorderThickness="0,1,0,0">
+      <DockPanel>
+        <StackPanel Orientation="Horizontal" Spacing="8" DockPanel.Dock="Left">
+          <Button x:Name="PlayPauseButton" Content="暫停" MinWidth="88" Click="OnPlayPause" />
+          <Button Content="停止" MinWidth="72" Click="OnStop" />
+        </StackPanel>
+        <TextBlock x:Name="TimeLabel"
+                   DockPanel.Dock="Right"
+                   VerticalAlignment="Center"
+                   Margin="12,0,0,0"
+                   FontFamily="IBM Plex Mono, Consolas, monospace"
+                   Foreground="#A89A94"
+                   Text="0:00 / 0:00" />
+        <Slider x:Name="SeekSlider"
+                Minimum="0" Maximum="1" Value="0"
+                VerticalAlignment="Center"
+                Margin="16,0"
+                PointerPressed="OnSeekStart"
+                PointerReleased="OnSeekEnd" />
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>

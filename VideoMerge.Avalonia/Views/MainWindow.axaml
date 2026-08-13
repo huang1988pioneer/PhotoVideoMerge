@@ -1,0 +1,263 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:VideoMerge.Avalonia.ViewModels"
+        xmlns:conv="using:VideoMerge.Avalonia.Converters"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="1280" d:DesignHeight="860"
+        x:Class="VideoMerge.Avalonia.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="VideoMerge · 桌面版"
+        Width="1280" Height="860"
+        MinWidth="960" MinHeight="680"
+        WindowStartupLocation="CenterScreen"
+        DragDrop.AllowDrop="True">
+
+  <Window.Resources>
+    <conv:IntDecimalConverter x:Key="IntDec" />
+    <conv:DoubleDecimalConverter x:Key="DblDec" />
+  </Window.Resources>
+
+  <Design.DataContext>
+    <vm:MainViewModel />
+  </Design.DataContext>
+
+  <Grid RowDefinitions="Auto,*,Auto">
+    <Border Padding="18,14" BorderBrush="{StaticResource VmBorderBrush}" BorderThickness="0,0,0,1" Background="#1A1A1A">
+      <DockPanel>
+        <StackPanel Orientation="Horizontal" Spacing="12">
+          <Border Width="32" Height="32" CornerRadius="8" Background="{StaticResource VmPrimaryBrush}">
+            <TextBlock Text="▶" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="14" />
+          </Border>
+          <StackPanel>
+            <TextBlock Classes="h1" Text="VideoMerge" />
+            <TextBlock Classes="hint" Text="桌面版 · 影片合併 · 圖片+MP3 成片 · 片段可單獨播放" />
+          </StackPanel>
+        </StackPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+          <Button Classes="ghost" Content="指定 FFmpeg" Command="{Binding PickFfmpegCommand}" />
+          <TextBlock Classes="mono" Text="{Binding FfmpegStatus}" VerticalAlignment="Center" MaxWidth="420" TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <Grid Grid.Row="1" ColumnDefinitions="380,*" Margin="16">
+      <ScrollViewer>
+        <StackPanel Spacing="14" Margin="0,0,12,0">
+          <Border Classes="panel">
+            <StackPanel Spacing="12">
+              <TextBlock Classes="h2" Text="加入影片 / 圖片" />
+              <TextBlock Classes="hint" Text="支援 MP4、WebM、MOV、MKV 與 JPG / PNG / WebP。圖片 + MP3 可直接成片，畫幅依原圖。" />
+              <Border x:Name="DropZone"
+                      MinHeight="128"
+                      CornerRadius="10"
+                      BorderBrush="{StaticResource VmBorderBrush}"
+                      BorderThickness="1.5"
+                      Background="#262626"
+                      PointerPressed="OnDropZonePressed">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="6">
+                  <TextBlock Text="拖曳到這裡，或點擊選擇" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                  <TextBlock Classes="hint" Text="可一次加入多段；每段影片可單獨播放" HorizontalAlignment="Center" />
+                </StackPanel>
+              </Border>
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Classes="ghost" Content="再加入" Command="{Binding AddMoreCommand}" IsEnabled="{Binding !IsBusy}" />
+                <Button Classes="danger" Content="清除全部" Command="{Binding ClearAllCommand}" IsEnabled="{Binding CanClear}" />
+                <CheckBox Content="不要聲音" IsChecked="{Binding NoAudio}" IsEnabled="{Binding !IsBusy}" VerticalAlignment="Center" />
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <Border Classes="panel">
+            <StackPanel Spacing="10">
+              <TextBlock Classes="h2" Text="延長 / 循環" />
+              <TextBlock Classes="hint" Text="{Binding EstimateText}" />
+              <StackPanel Orientation="Horizontal" Spacing="10">
+                <RadioButton GroupName="loop" Content="播一次" IsChecked="{Binding LoopOnce}" IsEnabled="{Binding !IsBusy}" />
+                <RadioButton GroupName="loop" Content="重複次數" IsChecked="{Binding LoopCountMode}" IsEnabled="{Binding !IsBusy}" />
+                <RadioButton GroupName="loop" Content="目標時長" IsChecked="{Binding LoopDurationMode}" IsEnabled="{Binding !IsBusy}" />
+              </StackPanel>
+              <StackPanel IsVisible="{Binding LoopCountMode}" Spacing="6">
+                <TextBlock Classes="hint" Text="重複幾次（整段序列）" />
+                <NumericUpDown Value="{Binding LoopCount, Converter={StaticResource IntDec}}" Minimum="1" Maximum="999" Increment="1" FormatString="0" />
+              </StackPanel>
+              <StackPanel IsVisible="{Binding LoopDurationMode}" Orientation="Horizontal" Spacing="8">
+                <StackPanel>
+                  <TextBlock Classes="hint" Text="時" />
+                  <NumericUpDown Value="{Binding LoopHours, Converter={StaticResource IntDec}}" Minimum="0" Maximum="2" Increment="1" FormatString="0" />
+                </StackPanel>
+                <StackPanel>
+                  <TextBlock Classes="hint" Text="分" />
+                  <NumericUpDown Value="{Binding LoopMins, Converter={StaticResource IntDec}}" Minimum="0" Maximum="59" Increment="1" FormatString="0" />
+                </StackPanel>
+                <StackPanel>
+                  <TextBlock Classes="hint" Text="秒" />
+                  <NumericUpDown Value="{Binding LoopSecs, Converter={StaticResource IntDec}}" Minimum="0" Maximum="59" Increment="1" FormatString="0" />
+                </StackPanel>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <Border Classes="panel">
+            <StackPanel Spacing="10">
+              <TextBlock Classes="h2" Text="自訂音軌" />
+              <TextBlock Classes="hint" Text="可選 MP3 當聲音（影片取代原音；純圖片則以 MP3 成片）。勾選「不要聲音」時會忽略。" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Classes="ghost" Content="選擇 MP3" Command="{Binding PickAudioCommand}" IsEnabled="{Binding !IsBusy}" />
+                <Button Classes="danger" Content="清除" Command="{Binding ClearAudioCommand}" IsEnabled="{Binding CanClearAudio}" />
+                <TextBlock Text="{Binding AudioName}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="180" />
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <Border Classes="panel">
+            <StackPanel Spacing="10">
+              <TextBlock Classes="h2" Text="語音稿字幕" />
+              <TextBlock Classes="hint" Text="貼上講稿後依時長自動切句；也支援 SRT / VTT。桌面版在合併時嵌入 mov_text。" />
+              <CheckBox Content="使用語音稿上字幕" IsChecked="{Binding UseScriptSubs}" IsEnabled="{Binding !IsBusy}" />
+              <TextBox Text="{Binding ScriptText}"
+                       Watermark="在此貼上語音稿，或上傳 SRT / 純文字…"
+                       AcceptsReturn="True"
+                       TextWrapping="Wrap"
+                       Height="140"
+                       IsEnabled="{Binding !IsBusy}" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Classes="ghost" Content="上傳稿件" Command="{Binding LoadScriptCommand}" IsEnabled="{Binding !IsBusy}" />
+                <Button Classes="danger" Content="清除稿件" Command="{Binding ClearScriptCommand}" IsEnabled="{Binding HasScript}" />
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="hint" Text="初始偏移（秒）" VerticalAlignment="Center" />
+                <NumericUpDown Value="{Binding SubOffsetSec, Converter={StaticResource DblDec}}" Increment="0.1" Minimum="-30" Maximum="30" FormatString="0.0" Width="100" />
+              </StackPanel>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+
+      <Grid Grid.Column="1" RowDefinitions="Auto,*,Auto,Auto">
+        <DockPanel Margin="0,0,0,10">
+          <TextBlock Classes="h2" Text="片段與首尾幀" />
+          <TextBlock Classes="hint" Text="{Binding ClipsCountText}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+        </DockPanel>
+
+        <Border Grid.Row="1" Classes="panel" Padding="10">
+          <ScrollViewer>
+            <ItemsControl ItemsSource="{Binding Clips}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                  <StackPanel Spacing="10" />
+                </ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:ClipItemViewModel">
+                  <Border Classes="clip">
+                    <Grid ColumnDefinitions="56,*" ColumnSpacing="12">
+                      <StackPanel Spacing="6" HorizontalAlignment="Center">
+                        <Border Width="28" Height="28" CornerRadius="99" Background="{StaticResource VmPrimaryBrush}">
+                          <TextBlock Text="{Binding Order}" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" />
+                        </Border>
+                        <Button Classes="ghost" Content="↑" Padding="8,4" Command="{Binding MoveUpCommand}" IsEnabled="{Binding CanMoveUp}" />
+                        <Button Classes="ghost" Content="↓" Padding="8,4" Command="{Binding MoveDownCommand}" IsEnabled="{Binding CanMoveDown}" />
+                        <Button Classes="danger" Content="×" Padding="8,4" Command="{Binding RemoveCommand}" IsEnabled="{Binding !IsBusy}" />
+                      </StackPanel>
+                      <StackPanel Spacing="8">
+                        <DockPanel>
+                          <Button DockPanel.Dock="Right"
+                                  Classes="primary"
+                                  Content="播放此段"
+                                  Command="{Binding PlayCommand}"
+                                  IsVisible="{Binding CanPlay}"
+                                  Padding="12,6" />
+                          <StackPanel>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                              <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                              <Border IsVisible="{Binding IsImage}" Background="#1A6B7A" CornerRadius="99" Padding="8,1">
+                                <TextBlock Text="{Binding KindTag}" FontSize="11" Foreground="#9DE4F0" />
+                              </Border>
+                            </StackPanel>
+                            <TextBlock Classes="mono" Text="{Binding StatsText}" />
+                          </StackPanel>
+                        </DockPanel>
+                        <Grid ColumnDefinitions="*,Auto,*" ColumnSpacing="10">
+                          <Border Background="#111" CornerRadius="8" ClipToBounds="True" MinHeight="96">
+                            <Panel>
+                              <Image Source="{Binding FirstFrame}" Stretch="UniformToFill" />
+                              <Button HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Classes="primary"
+                                      Content="▶ 播放"
+                                      Command="{Binding PlayCommand}"
+                                      IsVisible="{Binding CanPlay}"
+                                      Opacity="0.92" />
+                            </Panel>
+                          </Border>
+                          <TextBlock Grid.Column="1" Text="→" VerticalAlignment="Center" IsVisible="{Binding ShowLastFrame}" Foreground="{StaticResource VmMutedBrush}" />
+                          <Border Grid.Column="2" Background="#111" CornerRadius="8" ClipToBounds="True" MinHeight="96" IsVisible="{Binding ShowLastFrame}">
+                            <Image Source="{Binding LastFrame}" Stretch="UniformToFill" />
+                          </Border>
+                        </Grid>
+                        <TextBlock Text="{Binding Status}" FontSize="12.5" Foreground="#8FCB9B" />
+                      </StackPanel>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </Border>
+
+        <Border Grid.Row="2" Classes="panel" Margin="0,12,0,0">
+          <DockPanel>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8">
+              <Button Classes="primary"
+                      Content="{Binding MergeLabel}"
+                      Command="{Binding MergeCommand}"
+                      IsEnabled="{Binding CanMerge}"
+                      MinWidth="160" />
+            </StackPanel>
+            <StackPanel Spacing="4">
+              <TextBlock FontWeight="SemiBold" Text="準備就緒後合併輸出" />
+              <TextBlock Classes="hint" Text="先設定延長、音軌與字幕。每段影片可先單獨播放確認。" />
+            </StackPanel>
+          </DockPanel>
+        </Border>
+
+        <Border Grid.Row="3" Classes="panel" Margin="0,12,0,0">
+          <StackPanel Spacing="8">
+            <DockPanel>
+              <TextBlock FontWeight="SemiBold" Text="{Binding StatusText}" />
+              <TextBlock Classes="mono" Text="{Binding ProgressText}" HorizontalAlignment="Right" />
+            </DockPanel>
+            <ProgressBar Minimum="0" Maximum="1" Value="{Binding Progress}" />
+            <TextBox Text="{Binding LogText}"
+                     IsReadOnly="True"
+                     Height="92"
+                     FontFamily="Cascadia Mono, Consolas, monospace"
+                     FontSize="11"
+                     Watermark="合併紀錄會顯示在這裡" />
+            <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding HasResult}">
+              <Button Classes="primary" Content="播放合併結果" Command="{Binding PlayResultCommand}" />
+              <Button Classes="ghost" Content="在資料夾顯示" Command="{Binding OpenResultFolderCommand}" />
+              <TextBlock Classes="mono" Text="{Binding ResultPath}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="420" />
+            </StackPanel>
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Grid>
+
+    <Border Grid.Row="2" Padding="16,10" BorderBrush="{StaticResource VmBorderBrush}" BorderThickness="0,1,0,0">
+      <DockPanel>
+        <TextBlock Classes="hint" Text="本機 FFmpeg 處理 · 資料不離開你的裝置" />
+        <Border DockPanel.Dock="Right"
+                IsVisible="{Binding ToastVisible}"
+                Background="#333"
+                CornerRadius="8"
+                Padding="12,6"
+                HorizontalAlignment="Right">
+          <TextBlock Text="{Binding ToastText}" />
+        </Border>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>
